@@ -1,20 +1,21 @@
-"""Окно настроек: основные, плашка и звук, словарь имён, система. Изменения применяются сразу и сохраняются в config.json."""
+"""Окно настроек в системном стиле: значки-разделы в панели инструментов, выровненные формы, окно подстраивается под раздел."""
 from __future__ import annotations
 
 import os
 import subprocess
 
-import objc
-from AppKit import (NSApp, NSBackingStoreBuffered, NSButton, NSColor, NSFont, NSMakeRect, NSObject, NSPopUpButton, NSScrollView, NSSecureTextField, NSSlider, NSStepper,
-                    NSTabView, NSTabViewItem, NSTextField, NSTextView, NSView, NSWindow, NSWindowStyleMaskClosable, NSWindowStyleMaskMiniaturizable,
-                    NSWindowStyleMaskTitled)
+from AppKit import (NSApp, NSBackingStoreBuffered, NSButton, NSColor, NSFont, NSGridCellPlacementLeading, NSGridCellPlacementTop, NSGridCellPlacementTrailing,
+                    NSGridRowAlignmentFirstBaseline, NSGridView, NSImage, NSLayoutAttributeLeading, NSMakeRect, NSObject, NSPopUpButton, NSScrollView, NSSlider,
+                    NSStackView, NSStepper, NSTextField, NSTextView, NSToolbar, NSToolbarItem, NSView, NSWindow, NSWindowStyleMaskClosable,
+                    NSWindowStyleMaskTitled, NSWindowToolbarStylePreference)
 
 from spoke import __version__, autostart, config as cfg, permissions
 
-WIDTH, HEIGHT = 560, 450
-CONTENT_HEIGHT = 380
-LABEL_X, CONTROL_X, ROW = 20.0, 210.0, 38.0
 LOG_PATH = os.path.expanduser("~/Library/Logs/Spoke.log")
+PADDING = 26.0
+PANES = (("general", "Основные", "gearshape"), ("overlay", "Плашка и звук", "waveform"), ("vocabulary", "Словарь", "text.book.closed"),
+         ("system", "Система", "lock.shield"))
+UNITS = {"hold_ms": "мс", "double_tap_ms": "мс", "overlay_bottom_margin": "пт"}
 
 
 class _Controller(NSObject):
@@ -23,14 +24,49 @@ class _Controller(NSObject):
     def changed_(self, sender):
         self.owner.changed(str(sender.identifier()), sender)
 
+    def action_(self, sender):
+        self.owner.action(str(sender.identifier()))
+
+    def pane_(self, sender):
+        self.owner.select(str(sender.itemIdentifier()))
+
     def textDidChange_(self, notification):
         self.owner.vocabulary_changed()
 
-    def controlTextDidEndEditing_(self, notification):
-        self.owner.token_changed()
+    def toolbarAllowedItemIdentifiers_(self, toolbar):
+        return [pane[0] for pane in PANES]
 
-    def action_(self, sender):
-        self.owner.action(str(sender.identifier()))
+    def toolbarDefaultItemIdentifiers_(self, toolbar):
+        return [pane[0] for pane in PANES]
+
+    def toolbarSelectableItemIdentifiers_(self, toolbar):
+        return [pane[0] for pane in PANES]
+
+    def toolbar_itemForItemIdentifier_willBeInsertedIntoToolbar_(self, toolbar, identifier, flag):
+        pane = next(pane for pane in PANES if pane[0] == identifier)
+        item = NSToolbarItem.alloc().initWithItemIdentifier_(identifier)
+        item.setLabel_(pane[1])
+        item.setImage_(NSImage.imageWithSystemSymbolName_accessibilityDescription_(pane[2], pane[1]))
+        item.setTarget_(self)
+        item.setAction_("pane:")
+        return item
+
+
+def _label(text: str, secondary: bool = False, size: float = 13) -> NSTextField:
+    label = NSTextField.labelWithString_(text)
+    label.setFont_(NSFont.systemFontOfSize_(size))
+    if secondary:
+        label.setTextColor_(NSColor.secondaryLabelColor())
+    return label
+
+
+def _stack(views, vertical: bool = False, spacing: float = 8) -> NSStackView:
+    stack = NSStackView.stackViewWithViews_(views)
+    stack.setOrientation_(1 if vertical else 0)
+    stack.setSpacing_(spacing)
+    if vertical:
+        stack.setAlignment_(NSLayoutAttributeLeading)
+    return stack
 
 
 class SettingsWindow:
@@ -40,35 +76,48 @@ class SettingsWindow:
         self.controller.owner = self
         self.values: dict[str, NSTextField] = {}
         self.statuses: dict[str, NSTextField] = {}
+        self.update_status = _label("", True, 11)
         self.window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(0, 0, WIDTH, HEIGHT), NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskMiniaturizable, NSBackingStoreBuffered, False)
-        self.window.setTitle_("Настройки Spoke")
+            NSMakeRect(0, 0, 480, 300), NSWindowStyleMaskTitled | NSWindowStyleMaskClosable, NSBackingStoreBuffered, False)
         self.window.setReleasedWhenClosed_(False)
+        toolbar = NSToolbar.alloc().initWithIdentifier_("spoke.settings")
+        toolbar.setDelegate_(self.controller)
+        toolbar.setAllowsUserCustomization_(False)
+        self.toolbar = toolbar
+        self.window.setToolbar_(toolbar)
+        self.window.setToolbarStyle_(NSWindowToolbarStylePreference)
+        self.panes = {"general": self._general(), "overlay": self._overlay(), "vocabulary": self._vocabulary(), "system": self._system()}
         self.window.center()
-        tabs = NSTabView.alloc().initWithFrame_(NSMakeRect(12, 12, WIDTH - 24, HEIGHT - 28))
-        for title, build in (("Основные", self._general), ("Плашка и звук", self._overlay), ("Словарь", self._vocabulary), ("Система", self._system)):
-            item = NSTabViewItem.alloc().initWithIdentifier_(title)
-            item.setLabel_(title)
-            view = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, WIDTH - 44, CONTENT_HEIGHT))
-            build(view)
-            item.setView_(view)
-            tabs.addTabViewItem_(item)
-        self.window.contentView().addSubview_(tabs)
+        self.select("general", animate=False)
 
-    def _y(self, row: int) -> float:
-        return CONTENT_HEIGHT - 44 - row * ROW
+    def select(self, identifier: str, animate: bool = True) -> None:
+        pane = self.panes[identifier]
+        size = pane.frame().size
+        self.toolbar.setSelectedItemIdentifier_(identifier)
+        self.window.setTitle_(next(title for key, title, _ in PANES if key == identifier))
+        self.window.setContentView_(NSView.alloc().initWithFrame_(NSMakeRect(0, 0, size.width, size.height)))
+        frame = self.window.frameRectForContentRect_(NSMakeRect(0, 0, size.width, size.height))
+        top = self.window.frame().origin.y + self.window.frame().size.height
+        frame.origin.x, frame.origin.y = self.window.frame().origin.x, top - frame.size.height
+        self.window.setFrame_display_animate_(frame, True, animate and self.window.isVisible())
+        self.window.setContentView_(pane)
 
-    def _label(self, view, row: int, text: str, width: float = 180) -> None:
-        label = NSTextField.labelWithString_(text)
-        label.setFrame_(NSMakeRect(LABEL_X, self._y(row), width, 20))
-        view.addSubview_(label)
-
-    def _hint(self, view, row: int, text: str) -> None:
-        hint = NSTextField.labelWithString_(text)
-        hint.setFont_(NSFont.systemFontOfSize_(11))
-        hint.setTextColor_(NSColor.secondaryLabelColor())
-        hint.setFrame_(NSMakeRect(CONTROL_X, self._y(row) - 17, 290, 16))
-        view.addSubview_(hint)
+    def _pane(self, rows: list[list], tops: dict[int, float] | None = None, aligned_top: tuple[int, ...] = ()) -> NSView:
+        grid = NSGridView.gridViewWithViews_(rows)
+        grid.setRowSpacing_(12)
+        grid.setColumnSpacing_(12)
+        grid.columnAtIndex_(0).setXPlacement_(NSGridCellPlacementTrailing)
+        grid.columnAtIndex_(1).setXPlacement_(NSGridCellPlacementLeading)
+        grid.setRowAlignment_(NSGridRowAlignmentFirstBaseline)
+        for index, padding in (tops or {}).items():
+            grid.rowAtIndex_(index).setTopPadding_(padding)
+        for index in aligned_top:
+            grid.rowAtIndex_(index).setYPlacement_(NSGridCellPlacementTop)
+        size = grid.fittingSize()
+        pane = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, size.width + 2 * PADDING, size.height + 2 * PADDING))
+        grid.setFrame_(NSMakeRect(PADDING, PADDING, size.width, size.height))
+        pane.addSubview_(grid)
+        return pane
 
     def _wire(self, control, key: str):
         control.setIdentifier_(key)
@@ -76,139 +125,114 @@ class SettingsWindow:
         control.setAction_("changed:")
         return control
 
-    def _popup(self, view, row: int, key: str, titles: list[str], selected: int) -> None:
-        popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(CONTROL_X, self._y(row) - 3, 220, 26), False)
+    def _popup(self, key: str, titles: list[str], selected: int) -> NSPopUpButton:
+        popup = NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(0, 0, 200, 26), False)
         popup.addItemsWithTitles_(titles)
         popup.selectItemAtIndex_(selected)
-        view.addSubview_(self._wire(popup, key))
+        return self._wire(popup, key)
 
-    def _check(self, view, row: int, key: str, title: str, on: bool) -> None:
+    def _check(self, key: str, title: str, on: bool) -> NSButton:
         box = NSButton.checkboxWithTitle_target_action_(title, self.controller, "changed:")
-        box.setFrame_(NSMakeRect(CONTROL_X, self._y(row) - 2, 300, 22))
         box.setState_(int(on))
         box.setIdentifier_(key)
-        view.addSubview_(box)
+        return box
 
-    def _slider(self, view, row: int, key: str, low: float, high: float, value: float, unit: str) -> None:
+    def _slider(self, key: str, low: float, high: float, value: float) -> NSStackView:
         slider = NSSlider.sliderWithValue_minValue_maxValue_target_action_(value, low, high, self.controller, "changed:")
         slider.setIdentifier_(key)
-        slider.setFrame_(NSMakeRect(CONTROL_X, self._y(row) - 2, 190, 22))
-        view.addSubview_(slider)
-        shown = NSTextField.labelWithString_(f"{int(value)} {unit}")
-        shown.setFrame_(NSMakeRect(CONTROL_X + 200, self._y(row), 90, 20))
-        view.addSubview_(shown)
+        slider.widthAnchor().constraintEqualToConstant_(190).setActive_(True)
+        shown = _label(f"{int(value)} {UNITS[key]}")
+        shown.widthAnchor().constraintEqualToConstant_(56).setActive_(True)
         self.values[key] = shown
-        self.values[key + "_unit"] = unit
+        return _stack([slider, shown])
 
-    def _stepper(self, view, row: int, key: str, low: int, high: int, value: int, unit: str) -> None:
-        stepper = NSStepper.alloc().initWithFrame_(NSMakeRect(CONTROL_X + 60, self._y(row) - 3, 19, 27))
+    def _stepper(self, key: str, low: int, high: int, value: int, unit: str) -> NSStackView:
+        stepper = NSStepper.alloc().initWithFrame_(NSMakeRect(0, 0, 19, 27))
         stepper.setMinValue_(low)
         stepper.setMaxValue_(high)
         stepper.setIntValue_(value)
-        view.addSubview_(self._wire(stepper, key))
-        shown = NSTextField.labelWithString_(f"{value}")
-        shown.setFrame_(NSMakeRect(CONTROL_X, self._y(row), 54, 20))
-        view.addSubview_(shown)
-        unit_label = NSTextField.labelWithString_(unit)
-        unit_label.setFrame_(NSMakeRect(CONTROL_X + 86, self._y(row), 200, 20))
-        view.addSubview_(unit_label)
+        self._wire(stepper, key)
+        shown = _label(str(value))
+        shown.widthAnchor().constraintEqualToConstant_(30).setActive_(True)
         self.values[key] = shown
+        return _stack([shown, stepper, _label(unit, True)])
 
-    def _general(self, view) -> None:
+    def _button(self, key: str, title: str) -> NSButton:
+        button = NSButton.buttonWithTitle_target_action_(title, self.controller, "action:")
+        button.setIdentifier_(key)
+        return button
+
+    def _with_hint(self, control, hint: str) -> NSStackView:
+        return _stack([control, _label(hint, True, 11)], vertical=True, spacing=4)
+
+    def _general(self) -> NSView:
         c = self.config
-        self._label(view, 0, "Клавиша диктовки")
-        self._popup(view, 0, "hotkey", list(cfg.HOTKEY_NAMES.values()), list(cfg.HOTKEY_NAMES).index(c.hotkey))
-        self._label(view, 1, "Удержание до записи")
-        self._slider(view, 1, "hold_ms", 100, 800, c.hold_ms, "мс")
-        self._label(view, 2, "Двойное нажатие")
-        self._slider(view, 2, "double_tap_ms", 200, 800, c.double_tap_ms, "мс")
-        self._hint(view, 2, "Два быстрых нажатия включают постоянную запись.")
-        self._label(view, 3.4, "Язык речи")
-        self._popup(view, 3.4, "language", list(cfg.LANGUAGES.values()), list(cfg.LANGUAGES).index(c.language))
-        self._label(view, 4.4, "Помнить диктовок")
-        self._stepper(view, 4.4, "history_size", 1, 50, c.history_size, "последних, только в памяти")
-        self._label(view, 5.4, "Между вставками")
-        self._check(view, 5.4, "auto_space", "Ставить пробел, чтобы текст не слипался", c.auto_space)
-        self._label(view, 6.4, "Запуск")
-        self._check(view, 6.4, "autostart", "Запускать при входе в систему", autostart.enabled())
+        rows = [
+            [_label("Клавиша диктовки:"), self._popup("hotkey", list(cfg.HOTKEY_NAMES.values()), list(cfg.HOTKEY_NAMES).index(c.hotkey))],
+            [_label("Удержание до записи:"), self._slider("hold_ms", 100, 800, c.hold_ms)],
+            [_label("Двойное нажатие:"), self._with_hint(self._slider("double_tap_ms", 200, 800, c.double_tap_ms), "Два быстрых нажатия включают постоянную запись.")],
+            [_label("Язык речи:"), self._popup("language", list(cfg.LANGUAGES.values()), list(cfg.LANGUAGES).index(c.language))],
+            [_label("История:"), self._stepper("history_size", 1, 50, c.history_size, "последних диктовок (только в памяти)")],
+            [_label("Вставка:"), self._check("auto_space", "Ставить пробел между подряд идущими вставками", c.auto_space)],
+            [_label("Запуск:"), self._check("autostart", "Запускать при входе в систему", autostart.enabled())],
+        ]
+        return self._pane(rows, tops={3: 20, 5: 20})
 
-    def _overlay(self, view) -> None:
+    def _overlay(self) -> NSView:
         c = self.config
-        self._label(view, 0, "Плашка записи")
-        self._check(view, 0, "overlay", "Показывать плашку внизу экрана", c.overlay)
-        self._label(view, 1, "Высота над Dock")
-        self._slider(view, 1, "overlay_bottom_margin", 0, 80, c.overlay_bottom_margin, "пт")
-        self._hint(view, 1, "Если Dock скрыт, отсчёт идёт от низа экрана.")
-        self._label(view, 2.4, "Звук")
-        self._check(view, 2.4, "sounds", "Щелчки в начале и конце записи", c.sounds)
-        self._label(view, 3.4, "Распознавание")
-        self._check(view, 3.4, "streaming", "Распознавать, пока вы говорите", c.streaming)
-        self._hint(view, 3.4, "Быстрее на длинных; числа иногда пишутся иначе.")
+        rows = [
+            [_label("Плашка:"), self._check("overlay", "Показывать плашку записи внизу экрана", c.overlay)],
+            [_label("Высота над Dock:"), self._with_hint(self._slider("overlay_bottom_margin", 0, 80, c.overlay_bottom_margin), "Если Dock скрыт, отсчёт идёт от низа экрана.")],
+            [_label("Звук:"), self._check("sounds", "Щелчки в начале и конце записи", c.sounds)],
+            [_label("Распознавание:"), self._with_hint(self._check("streaming", "Распознавать, пока вы говорите", c.streaming),
+                                                       "Быстрее на длинных диктовках; числа иногда пишутся иначе.")],
+        ]
+        return self._pane(rows, tops={2: 20, 3: 20})
 
-    def _vocabulary(self, view) -> None:
-        self._label(view, 0, "Имена и термины, по одному в строке", 440)
-        self._hint_line = NSTextField.labelWithString_("Whisper будет писать их так, как указано (например, Пётр, Kubernetes, Allure).")
-        self._hint_line.setFont_(NSFont.systemFontOfSize_(11))
-        self._hint_line.setFrame_(NSMakeRect(LABEL_X, self._y(0) - 20, 480, 16))
-        view.addSubview_(self._hint_line)
-        scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(LABEL_X, 20, WIDTH - 84, CONTENT_HEIGHT - 110))
+    def _vocabulary(self) -> NSView:
+        scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, 360, 200))
         scroll.setHasVerticalScroller_(True)
         scroll.setBorderType_(2)
-        text = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, WIDTH - 100, CONTENT_HEIGHT - 110))
+        text = NSTextView.alloc().initWithFrame_(NSMakeRect(0, 0, 340, 200))
         text.setFont_(NSFont.systemFontOfSize_(13))
         text.setVerticallyResizable_(True)
         text.setAutoresizingMask_(2)
         text.setString_("\n".join(self.config.vocabulary))
         text.setDelegate_(self.controller)
         scroll.setDocumentView_(text)
-        view.addSubview_(scroll)
+        scroll.widthAnchor().constraintEqualToConstant_(360).setActive_(True)
+        scroll.heightAnchor().constraintEqualToConstant_(200).setActive_(True)
         self.vocabulary_view = text
+        hint = "По одному в строке, например Пётр или Kubernetes."
+        return self._pane([[_label("Имена и термины:"), self._with_hint(scroll, hint)]], aligned_top=(0,))
 
-    def _system(self, view) -> None:
+    def _status_row(self, key: str, button_key: str) -> NSStackView:
+        status = _label("")
+        status.widthAnchor().constraintEqualToConstant_(150).setActive_(True)
+        self.statuses[key] = status
+        return _stack([status, self._button(button_key, "Открыть настройки…")])
+
+    def _system(self) -> NSView:
         c = self.config
-        for row, (key, title) in enumerate((("accessibility", "Универсальный доступ"), ("input", "Мониторинг ввода"), ("microphone", "Микрофон"))):
-            self._label(view, row, title)
-            status = NSTextField.labelWithString_("")
-            status.setFrame_(NSMakeRect(CONTROL_X, self._y(row), 150, 20))
-            view.addSubview_(status)
-            self.statuses[key] = status
-            button = NSButton.buttonWithTitle_target_action_("Открыть настройки", self.controller, "action:")
-            button.setFrame_(NSMakeRect(CONTROL_X + 150, self._y(row) - 5, 150, 28))
-            button.setIdentifier_("open_" + key)
-            view.addSubview_(button)
-        self._label(view, 3.4, "Модель в памяти")
-        self._stepper(view, 3.4, "keep_warm_seconds", 0, 300, c.keep_warm_seconds, "с (0 — выключено)")
-        self._hint(view, 3.4, "Без этого первая диктовка после паузы идёт 5–15 с.")
-        self._label(view, 4.8, "Журнал")
-        log = NSButton.buttonWithTitle_target_action_("Показать в Finder", self.controller, "action:")
-        log.setFrame_(NSMakeRect(CONTROL_X, self._y(4.8) - 5, 150, 28))
-        log.setIdentifier_("show_log")
-        view.addSubview_(log)
-        self._label(view, 6.0, "Версия " + __version__)
-        update = NSButton.buttonWithTitle_target_action_("Проверить обновления", self.controller, "action:")
-        update.setFrame_(NSMakeRect(CONTROL_X, self._y(6.0) - 5, 170, 28))
-        update.setIdentifier_("update")
-        view.addSubview_(update)
-        self.update_status = NSTextField.labelWithString_("")
-        self.update_status.setFont_(NSFont.systemFontOfSize_(11))
-        self.update_status.setTextColor_(NSColor.secondaryLabelColor())
-        self.update_status.setFrame_(NSMakeRect(CONTROL_X, self._y(6.0) - 24, 290, 16))
-        view.addSubview_(self.update_status)
-        self._check(view, 7.2, "check_updates_on_start", "Проверять обновления при запуске", self.config.check_updates_on_start)
-        self._label(view, 8.2, "Токен GitHub")
-        self.token_field = NSSecureTextField.alloc().initWithFrame_(NSMakeRect(CONTROL_X, self._y(8.2) - 3, 290, 24))
-        self.token_field.setStringValue_(self.config.github_token)
-        self.token_field.setPlaceholderString_("нужен, пока репозиторий приватный")
-        self.token_field.setDelegate_(self.controller)
-        view.addSubview_(self.token_field)
+        update = _stack([self._button("update", "Проверить обновления…"), self.update_status])
+        rows = [
+            [_label("Универсальный доступ:"), self._status_row("accessibility", "open_accessibility")],
+            [_label("Мониторинг ввода:"), self._status_row("input", "open_input")],
+            [_label("Микрофон:"), self._status_row("microphone", "open_microphone")],
+            [_label("Модель в памяти:"), self._with_hint(self._stepper("keep_warm_seconds", 0, 300, c.keep_warm_seconds, "с между поддержанием (0 — выключено)"),
+                                                         "Без этого первая диктовка после паузы идёт 5–15 с.")],
+            [_label("Журнал:"), self._button("show_log", "Показать в Finder")],
+            [_label(f"Версия {__version__}:"), update],
+            [_label(""), self._check("check_updates_on_start", "Проверять обновления при запуске", c.check_updates_on_start)],
+        ]
+        pane = self._pane(rows, tops={3: 20, 5: 20, 6: 6})
         self.refresh_permissions()
+        return pane
 
     def refresh_permissions(self) -> None:
-        def mark(ok: bool | None) -> str:
-            return "Не проверяется" if ok is None else ("✓ Выдано" if ok else "✕ Не выдано")
         if self.statuses:
-            self.statuses["accessibility"].setStringValue_(mark(permissions.accessibility_granted()))
-            self.statuses["input"].setStringValue_(mark(permissions.input_monitoring_granted()))
+            self.statuses["accessibility"].setStringValue_("✓ Выдано" if permissions.accessibility_granted() else "✕ Не выдано")
+            self.statuses["input"].setStringValue_("✓ Выдано" if permissions.input_monitoring_granted() else "✕ Не выдано")
             self.statuses["microphone"].setStringValue_("Спросит при записи")
 
     def show(self) -> None:
@@ -227,10 +251,10 @@ class SettingsWindow:
             self.engine.reload_hotkey()
         elif key == "language":
             c.language = list(cfg.LANGUAGES)[sender.indexOfSelectedItem()]
-        elif key in ("hold_ms", "double_tap_ms", "overlay_bottom_margin"):
+        elif key in UNITS:
             value = int(round(sender.doubleValue()))
             setattr(c, key, float(value) if key == "overlay_bottom_margin" else value)
-            self.values[key].setStringValue_(f"{value} {self.values[key + '_unit']}")
+            self.values[key].setStringValue_(f"{value} {UNITS[key]}")
             if key != "overlay_bottom_margin":
                 self.engine.reload_hotkey()
         elif key in ("history_size", "keep_warm_seconds"):
@@ -246,10 +270,6 @@ class SettingsWindow:
             setattr(c, key, bool(sender.state()))
         cfg.save(c)
         self.on_change(key)
-
-    def token_changed(self) -> None:
-        self.config.github_token = str(self.token_field.stringValue()).strip()
-        cfg.save(self.config)
 
     def vocabulary_changed(self) -> None:
         lines = [line.strip() for line in str(self.vocabulary_view.string()).splitlines()]
