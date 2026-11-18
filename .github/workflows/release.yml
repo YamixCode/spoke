@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -18,7 +18,7 @@ jobs:
       - name: Версия в коде совпадает с тегом
         run: test "v$(python scripts/build_code_zip.py --version)" = "$GITHUB_REF_NAME"
       - name: Собрать архив с кодом
-        run: python scripts/build_code_zip.py dist
+        run: python scripts/build_code_zip.py dist --require-native
       - name: Создать релиз
         env:
           GH_TOKEN: ${{ github.token }}

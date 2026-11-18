@@ -39,6 +39,10 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 .venv/bin/python -m pytest -q
 ```
 
+## Окно настроек
+
+Формы окна настроек написаны на SwiftUI (`spoke/native/SettingsUI.swift`) и собираются в библиотеку `libSpokeUI.dylib`, которую Python загружает при открытии окна. Нужен Swift (Command Line Tools или Xcode): `./scripts/build_native.sh`; `start.sh` и `packaging/build.sh` делают это сами. Библиотека входит и в архив обновления, поэтому вид окна обновляется кнопкой без нового DMG.
+
 ## Сборка приложения и DMG
 
 Нужны `.venv` с зависимостями из `requirements-dev.txt` и модель в `packaging/model/` (`config.json` и `weights.safetensors` из `mlx-community/whisper-large-v3-turbo`).

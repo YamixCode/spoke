@@ -7,3 +7,4 @@ dist/
 build/
 packaging/model/
 packaging/build.log
+spoke/native/libSpokeUI.dylib

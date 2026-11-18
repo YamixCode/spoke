@@ -15,3 +15,9 @@ jobs:
           python-version: "3.12"
       - run: pip install numpy pytest certifi
       - run: python -m pytest -q
+
+  native:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/build_native.sh
