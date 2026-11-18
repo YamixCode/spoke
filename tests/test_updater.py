@@ -110,3 +110,18 @@ def test_build_code_zip_produces_archive_that_apply_accepts(tmp_path, monkeypatc
     serve(monkeypatch, built.read_bytes())
     updater.apply(release(version), code_dir=tmp_path / "code", shell_api=1)
     assert (tmp_path / "code" / "spoke" / "app.py").exists()
+
+
+def test_release_notes_hide_markdown_and_github_boilerplate():
+    generated = """## What's Changed
+* Лицензия MIT by @YamixCode in https://github.com/YamixCode/spoke/pull/4
+* Окно настроек в системном стиле by @YamixCode in https://github.com/YamixCode/spoke/pull/5
+* Версия 1.0.1 by @YamixCode in https://github.com/YamixCode/spoke/pull/6
+
+
+**Full Changelog**: https://github.com/YamixCode/spoke/compare/v1.0.0...v1.0.1
+"""
+    assert updater.release_notes(generated) == "• Лицензия MIT\n• Окно настроек в системном стиле"
+    written = "## Что нового\n\n- Быстрее **запуск**, см. [описание](https://example.com/x)\n- Исправлена `вставка`\n"
+    assert updater.release_notes(written) == "Что нового\n\n• Быстрее запуск, см. описание\n• Исправлена вставка"
+    assert updater.release_notes("") == ""
