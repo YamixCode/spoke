@@ -4,3 +4,4 @@ pynput
 rumps
 numpy
 pyobjc-framework-Quartz
+certifi

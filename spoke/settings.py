@@ -5,7 +5,7 @@ import os
 import subprocess
 
 import objc
-from AppKit import (NSApp, NSBackingStoreBuffered, NSButton, NSColor, NSFont, NSMakeRect, NSObject, NSPopUpButton, NSScrollView, NSSlider, NSStepper,
+from AppKit import (NSApp, NSBackingStoreBuffered, NSButton, NSColor, NSFont, NSMakeRect, NSObject, NSPopUpButton, NSScrollView, NSSecureTextField, NSSlider, NSStepper,
                     NSTabView, NSTabViewItem, NSTextField, NSTextView, NSView, NSWindow, NSWindowStyleMaskClosable, NSWindowStyleMaskMiniaturizable,
                     NSWindowStyleMaskTitled)
 
@@ -26,13 +26,16 @@ class _Controller(NSObject):
     def textDidChange_(self, notification):
         self.owner.vocabulary_changed()
 
+    def controlTextDidEndEditing_(self, notification):
+        self.owner.token_changed()
+
     def action_(self, sender):
         self.owner.action(str(sender.identifier()))
 
 
 class SettingsWindow:
-    def __init__(self, config: cfg.Config, engine, on_change=lambda key: None):
-        self.config, self.engine, self.on_change = config, engine, on_change
+    def __init__(self, config: cfg.Config, engine, on_change=lambda key: None, on_update=lambda: ""):
+        self.config, self.engine, self.on_change, self.on_update = config, engine, on_change, on_update
         self.controller = _Controller.alloc().init()
         self.controller.owner = self
         self.values: dict[str, NSTextField] = {}
@@ -182,6 +185,22 @@ class SettingsWindow:
         log.setIdentifier_("show_log")
         view.addSubview_(log)
         self._label(view, 6.0, "Версия " + __version__)
+        update = NSButton.buttonWithTitle_target_action_("Проверить обновления", self.controller, "action:")
+        update.setFrame_(NSMakeRect(CONTROL_X, self._y(6.0) - 5, 170, 28))
+        update.setIdentifier_("update")
+        view.addSubview_(update)
+        self.update_status = NSTextField.labelWithString_("")
+        self.update_status.setFont_(NSFont.systemFontOfSize_(11))
+        self.update_status.setTextColor_(NSColor.secondaryLabelColor())
+        self.update_status.setFrame_(NSMakeRect(CONTROL_X, self._y(6.0) - 24, 290, 16))
+        view.addSubview_(self.update_status)
+        self._check(view, 7.2, "check_updates_on_start", "Проверять обновления при запуске", self.config.check_updates_on_start)
+        self._label(view, 8.2, "Токен GitHub")
+        self.token_field = NSSecureTextField.alloc().initWithFrame_(NSMakeRect(CONTROL_X, self._y(8.2) - 3, 290, 24))
+        self.token_field.setStringValue_(self.config.github_token)
+        self.token_field.setPlaceholderString_("нужен, пока репозиторий приватный")
+        self.token_field.setDelegate_(self.controller)
+        view.addSubview_(self.token_field)
         self.refresh_permissions()
 
     def refresh_permissions(self) -> None:
@@ -223,10 +242,14 @@ class SettingsWindow:
         elif key == "autostart":
             (autostart.enable if sender.state() else autostart.disable)()
             return self.on_change(key)
-        elif key in ("auto_space", "overlay", "sounds", "streaming"):
+        elif key in ("auto_space", "overlay", "sounds", "streaming", "check_updates_on_start"):
             setattr(c, key, bool(sender.state()))
         cfg.save(c)
         self.on_change(key)
+
+    def token_changed(self) -> None:
+        self.config.github_token = str(self.token_field.stringValue()).strip()
+        cfg.save(self.config)
 
     def vocabulary_changed(self) -> None:
         lines = [line.strip() for line in str(self.vocabulary_view.string()).splitlines()]
@@ -240,5 +263,7 @@ class SettingsWindow:
             subprocess.run(["open", permissions.INPUT_MONITORING_PANE], check=False)
         elif key == "open_microphone":
             subprocess.run(["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"], check=False)
+        elif key == "update":
+            self.update_status.setStringValue_(self.on_update())
         elif key == "show_log":
             subprocess.run(["open", "-R", LOG_PATH], check=False)
