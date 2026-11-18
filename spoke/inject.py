@@ -22,14 +22,12 @@ def set_clipboard(text: str) -> None:
 
 
 def press_cmd_v() -> None:
-    try:
-        from pynput.keyboard import Controller, Key
-        keyboard = Controller()
-        with keyboard.pressed(Key.cmd):
-            keyboard.press("v")
-            keyboard.release("v")
-    except Exception:
-        subprocess.run(["osascript", "-e", 'tell application "System Events" to keystroke "v" using command down'], timeout=5, check=False)
+    import Quartz
+    source = Quartz.CGEventSourceCreate(Quartz.kCGEventSourceStateHIDSystemState)
+    for pressed in (True, False):
+        event = Quartz.CGEventCreateKeyboardEvent(source, 9, pressed)
+        Quartz.CGEventSetFlags(event, Quartz.kCGEventFlagMaskCommand)
+        Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
 
 
 def paste_text(text: str, restore: bool = True, trailing_space: bool = False) -> None:

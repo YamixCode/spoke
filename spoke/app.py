@@ -28,7 +28,7 @@ class SpokeApp(rumps.App):
         super().__init__("Spoke", title=None, icon=str(ASSETS / ICONS[LOADING][0]), template=True, quit_button=None)
         self._shown_icon = None
         self.config = config
-        self.engine = Engine(config, notify=lambda title, text: rumps.notification(title, "", text))
+        self.engine = Engine(config, notify=lambda title, text: rumps.notification(title, "", text), history_path=cfg.HISTORY_FILE, recovery_file=cfg.RECOVERY_FILE)
         self.status_item = rumps.MenuItem(STATUS[LOADING])
         self.paste_last_item = rumps.MenuItem("Вставить последний текст", callback=self._paste_last)
         self.copy_last_item = rumps.MenuItem("Скопировать последний текст", callback=self._copy_last)
@@ -169,8 +169,14 @@ class SpokeApp(rumps.App):
         for index, text in enumerate(history):
             line = " ".join(text.split())
             self.history_menu.add(rumps.MenuItem(f"{index + 1}. {line[:60]}{'…' if len(line) > 60 else ''}", callback=self._paste_history(index)))
-        if not has:
+        if has:
+            self.history_menu.add(None)
+            self.history_menu.add(rumps.MenuItem("Очистить историю", callback=self._clear_history))
+        else:
             self.history_menu.add(rumps.MenuItem("Пока пусто"))
+
+    def _clear_history(self, _) -> None:
+        self.engine.clear_history()
 
     def _paste_last(self, _) -> None:
         self.engine.paste_from_history(0)

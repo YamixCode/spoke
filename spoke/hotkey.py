@@ -11,15 +11,6 @@ from typing import Callable
 IDLE, PENDING, RECORDING, BLOCKED, LOCKED, RELEASING = "idle", "pending", "recording", "blocked", "locked", "releasing"
 
 
-def normalize_key(key) -> str | None:
-    """Имя клавиши pynput в наши имена («ctrl», «right_option», «f13»…); `None` — не интересует."""
-    name = getattr(key, "name", None)
-    if name is None:
-        return "char"
-    return {"ctrl_l": "ctrl", "ctrl_r": "ctrl", "alt_r": "right_option", "alt_gr": "right_option", "alt": "option", "alt_l": "option",
-            "cmd_r": "right_cmd", "cmd": "cmd", "cmd_l": "cmd", "shift_r": "right_shift", "shift": "shift", "shift_l": "shift"}.get(name, name)
-
-
 class HoldGate:
     def __init__(self, target: str, hold_ms: int, on_start: Callable[[], None], on_stop: Callable[[], None],
                  on_cancel: Callable[[], None], clock: Callable[[], float] = time.monotonic,

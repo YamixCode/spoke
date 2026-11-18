@@ -1,6 +1,5 @@
 mlx-whisper
 sounddevice
-pynput
 rumps
 numpy
 pyobjc-framework-Quartz

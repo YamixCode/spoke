@@ -1,7 +1,10 @@
-"""Запись с микрофона: 16 кГц, моно, в памяти (на диск ничего не пишется)."""
+"""Запись с микрофона: 16 кГц, моно, в памяти и одновременно в файл-журнал, чтобы сказанное пережило падение приложения."""
 from __future__ import annotations
 
+import os
+import queue
 import threading
+from pathlib import Path
 
 import numpy as np
 
@@ -9,8 +12,11 @@ from spoke.transcribe import SAMPLE_RATE
 
 
 class Recorder:
-    def __init__(self, max_seconds: int = 180):
+    def __init__(self, max_seconds: int = 180, journal: Path | None = None):
         self.max_seconds = max_seconds
+        self.journal = journal
+        self._journal_queue: queue.Queue | None = None
+        self._journal_writer: threading.Thread | None = None
         self._chunks: list[np.ndarray] = []
         self._stream = None
         self._lock = threading.Lock()
@@ -26,11 +32,15 @@ class Recorder:
             if self._stream is not None:
                 return
             self._chunks = []
+            self._open_journal()
 
             def callback(indata, frames, time_info, status):           # noqa: ARG001
                 self.level = float(np.sqrt(np.mean(np.square(indata[:, 0]))))
                 if sum(len(c) for c in self._chunks) < self.max_seconds * SAMPLE_RATE:
-                    self._chunks.append(indata[:, 0].copy())
+                    chunk = indata[:, 0].copy()
+                    self._chunks.append(chunk)
+                    if self._journal_queue is not None:
+                        self._journal_queue.put(chunk)
             self._stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32", callback=callback)
             self._stream.start()
 
@@ -47,8 +57,36 @@ class Recorder:
             stream.stop()
             stream.close()
         self.level = 0.0
+        self._close_journal()
         chunks, self._chunks = self._chunks, []
         return np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)
 
     def cancel(self) -> None:
         self.stop()
+        self.discard_journal()
+
+    def discard_journal(self) -> None:
+        if self.journal is not None:
+            self.journal.unlink(missing_ok=True)
+
+    def _open_journal(self) -> None:
+        if self.journal is None:
+            return
+        self.journal.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        handle = os.fdopen(os.open(self.journal, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb")
+        pending: queue.Queue = queue.Queue()
+        self._journal_queue = pending
+
+        def write() -> None:
+            with handle:
+                while (chunk := pending.get()) is not None:
+                    handle.write((np.clip(chunk, -1.0, 1.0) * 32767).astype("<i2").tobytes())
+                    handle.flush()
+        self._journal_writer = threading.Thread(target=write, daemon=True)
+        self._journal_writer.start()
+
+    def _close_journal(self) -> None:
+        if self._journal_queue is not None:
+            self._journal_queue.put(None)
+            self._journal_writer.join(timeout=3)
+            self._journal_queue = self._journal_writer = None

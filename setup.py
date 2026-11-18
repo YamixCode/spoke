@@ -13,7 +13,7 @@ SHELL_API = re.search(r"SHELL_API\s*=\s*(\d+)", SOURCE).group(1)
 OPTIONS = {
     "iconfile": "packaging/Spoke.icns",
     "excludes": ["mlx", "torch", "torchgen", "torchaudio", "torchvision", "sympy", "tkinter", "matplotlib", "pytest"],
-    "packages": ["spoke", "mlx_whisper", "rumps", "pynput", "sounddevice", "_sounddevice_data", "numpy", "tiktoken", "huggingface_hub", "certifi",
+    "packages": ["spoke", "mlx_whisper", "rumps", "sounddevice", "_sounddevice_data", "numpy", "tiktoken", "huggingface_hub", "certifi",
                  "tqdm", "more_itertools", "objc", "AppKit", "Foundation", "Quartz", "ApplicationServices"],
     "resources": ["packaging/model"],
     "plist": {

@@ -6,6 +6,9 @@ import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+DATA_DIR = Path.home() / "Library" / "Application Support" / "Spoke"
+HISTORY_FILE = DATA_DIR / "history.jsonl"
+RECOVERY_FILE = DATA_DIR / "recovery" / "recording.pcm"
 CONFIG_PATH = Path(os.environ.get("SPOKE_CONFIG") or Path.home() / ".config" / "spoke" / "config.json")
 LEGACY_CONFIG_PATH = Path.home() / ".config" / "localflow" / "config.json"
 DEFAULT_MODEL = "mlx-community/whisper-large-v3-turbo"
@@ -39,6 +42,7 @@ class Config:
     chunk_pause_seconds: float = 0.6
     keep_warm_seconds: int = 45
     check_updates_on_start: bool = True
+    save_history: bool = True
     history_size: int = 10
     double_tap_ms: int = 400
     locked_max_seconds: int = 1800

@@ -1,6 +1,4 @@
-from types import SimpleNamespace
-
-from spoke.hotkey import HoldGate, normalize_key
+from spoke.hotkey import HoldGate
 
 
 class Clock:
@@ -75,11 +73,6 @@ def test_key_repeat_and_other_keys_without_target_are_ignored_and_state_recovers
     g.tick()
     assert events == ["start", "stop", "start"]
 
-
-def test_normalize_key_maps_pynput_names():
-    assert normalize_key(SimpleNamespace(name="ctrl_l")) == "ctrl" and normalize_key(SimpleNamespace(name="ctrl_r")) == "ctrl"
-    assert normalize_key(SimpleNamespace(name="alt_r")) == "right_option" and normalize_key(SimpleNamespace(name="f13")) == "f13"
-    assert normalize_key(object()) == "char"
 
 
 def locked_gate():
