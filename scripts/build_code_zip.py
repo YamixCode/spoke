@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shutil
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -14,7 +16,15 @@ def version() -> str:
     return re.search(r'__version__\s*=\s*"([^"]+)"', (ROOT / "spoke" / "__init__.py").read_text(encoding="utf-8")).group(1)
 
 
-def build(destination: Path) -> Path:
+def build_native(required: bool) -> None:
+    if shutil.which("swiftc"):
+        subprocess.run([str(ROOT / "scripts" / "build_native.sh")], check=True)
+    elif required:
+        raise SystemExit("swiftc не найден: библиотеку окна настроек нужно собирать на macOS")
+
+
+def build(destination: Path, require_native: bool = False) -> Path:
+    build_native(require_native)
     destination.mkdir(parents=True, exist_ok=True)
     archive = destination / f"spoke-code-{version()}.zip"
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
@@ -30,4 +40,5 @@ if __name__ == "__main__":
     if "--version" in sys.argv:
         print(version())
     else:
-        print(build(Path(sys.argv[1] if len(sys.argv) > 1 else "dist")))
+        arguments = [argument for argument in sys.argv[1:] if not argument.startswith("--")]
+        print(build(Path(arguments[0] if arguments else "dist"), "--require-native" in sys.argv))
