@@ -14,7 +14,7 @@ from spoke import inject, sounds
 from spoke.config import Config
 from spoke.history import HistoryStore
 from spoke.hotkey import HoldGate
-from spoke.keys import KeyListener
+from spoke.keys import KeyListener, Shortcut
 from spoke.recorder import Recorder
 from spoke.streaming import StreamSession
 from spoke.transcribe import SAMPLE_RATE, Transcriber, is_silence
@@ -43,16 +43,21 @@ class Engine:
         self.recording_since = 0.0
         self._last_paste_at: float | None = None
         self._jobs: queue.Queue = queue.Queue()
+        self.capturing_shortcut = False
         self.gate = self._make_gate()
         self._listener = None
         threading.Thread(target=self._worker, daemon=True).start()
 
     def _make_gate(self) -> HoldGate:
-        return HoldGate(self.config.hotkey, self.config.hold_ms, self._start, self._stop, self._cancel, on_lock=self._start_locked,
+        target = "shortcut" if self.config.hotkey.startswith("key:") else self.config.hotkey
+        on_lock = self._start_locked if target != "shortcut" or Shortcut.parse(self.config.hotkey).is_modifier else None
+        return HoldGate(target, self.config.hold_ms, self._start, self._stop, self._cancel, on_lock=on_lock,
                         double_tap_ms=self.config.double_tap_ms, on_press=self._prewarm)
 
     def reload_hotkey(self) -> None:
         self.gate = self._make_gate()
+        if self._listener is not None:
+            self.restart_listening()
 
     def start_listening(self) -> None:
         self._start_listener()
@@ -65,8 +70,15 @@ class Engine:
         self._start_listener()
 
     def _start_listener(self) -> None:
-        self._listener = KeyListener(lambda name: self.gate.key_down(name), lambda name: self.gate.key_up(name))
+        shortcut = Shortcut.parse(self.config.hotkey) if self.config.hotkey.startswith("key:") else None
+        self._listener = KeyListener(lambda name: self.gate.key_down(name), lambda name: self.gate.key_up(name),
+                                     shortcut=shortcut, gate_state=lambda: self.gate.state,
+                                     suspended=lambda: self.capturing_shortcut, on_suspend=self._make_fresh_gate)
         self._listener.start()
+
+    def _make_fresh_gate(self) -> None:
+        self._cancel()
+        self.gate = self._make_gate()
 
     def _prewarm(self) -> None:
         if self.state == IDLE and hasattr(self.transcriber, "prewarm"):
@@ -82,7 +94,7 @@ class Engine:
         while True:
             seconds = self.config.keep_warm_seconds
             time.sleep(seconds if seconds > 0 else 5)
-            if seconds <= 0 or not getattr(self.transcriber, "ready", False) or self.state not in (IDLE, RECORDING):
+            if self.config.keep_warm_seconds <= 0 or not getattr(self.transcriber, "ready", False) or self.state not in (IDLE, RECORDING):
                 continue
             try:
                 self.transcriber.touch()

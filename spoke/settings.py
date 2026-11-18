@@ -3,21 +3,20 @@ from __future__ import annotations
 
 import ctypes
 import json
+import logging
 import os
 import subprocess
 from pathlib import Path
 
 import objc
-from AppKit import (NSApp, NSBackingStoreBuffered, NSImage, NSMakeRect, NSObject, NSToolbar, NSToolbarItem, NSView, NSWindow, NSWindowStyleMaskClosable,
-                    NSWindowStyleMaskTitled, NSWindowToolbarStylePreference)
+from AppKit import (NSApp, NSBackingStoreBuffered, NSMakeRect, NSObject, NSTitlebarSeparatorStyleNone, NSView, NSWindow,
+                    NSWindowStyleMaskClosable, NSWindowStyleMaskTitled)
 
 from spoke import __version__, autostart, config as cfg, permissions
 
 LIBRARY = "libSpokeUI.dylib"
 LOG_PATH = os.path.expanduser("~/Library/Logs/Spoke.log")
-PANES = (("general", "Основные", "gearshape"), ("overlay", "Плашка и звук", "waveform"), ("vocabulary", "Словарь", "text.book.closed"),
-         ("system", "Система", "lock.shield"))
-RESTART_HOTKEY = ("hotkey", "hold_ms", "double_tap_ms")
+PANES = ("general", "overlay", "system")
 
 
 def library_path() -> Path:
@@ -33,32 +32,14 @@ def library_path() -> Path:
 class _Controller(NSObject):
     owner = None
 
-    def pane_(self, sender):
-        self.owner.select(str(sender.itemIdentifier()))
-
     def settingChanged_value_(self, key, value):
         self.owner.changed(str(key), str(value))
 
     def settingAction_(self, name):
         self.owner.action(str(name))
 
-    def toolbarAllowedItemIdentifiers_(self, toolbar):
-        return [pane[0] for pane in PANES]
-
-    def toolbarDefaultItemIdentifiers_(self, toolbar):
-        return [pane[0] for pane in PANES]
-
-    def toolbarSelectableItemIdentifiers_(self, toolbar):
-        return [pane[0] for pane in PANES]
-
-    def toolbar_itemForItemIdentifier_willBeInsertedIntoToolbar_(self, toolbar, identifier, flag):
-        pane = next(pane for pane in PANES if pane[0] == identifier)
-        item = NSToolbarItem.alloc().initWithItemIdentifier_(identifier)
-        item.setLabel_(pane[1])
-        item.setImage_(NSImage.imageWithSystemSymbolName_accessibilityDescription_(pane[2], pane[1]))
-        item.setTarget_(self)
-        item.setAction_("pane:")
-        return item
+    def windowDidResignKey_(self, _):
+        self.owner.bridge.stopCapture()
 
 
 class SettingsWindow:
@@ -72,28 +53,25 @@ class SettingsWindow:
         self.window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(0, 0, 560, 300), NSWindowStyleMaskTitled | NSWindowStyleMaskClosable, NSBackingStoreBuffered, False)
         self.window.setReleasedWhenClosed_(False)
-        self.toolbar = NSToolbar.alloc().initWithIdentifier_("spoke.settings")
-        self.toolbar.setDelegate_(self.controller)
-        self.toolbar.setAllowsUserCustomization_(False)
-        self.window.setToolbar_(self.toolbar)
-        self.window.setToolbarStyle_(NSWindowToolbarStylePreference)
-        self.window.center()
+        self.window.setDelegate_(self.controller)
+        self.window.setTitle_("Настройки Spoke")
+        self.window.setTitlebarAppearsTransparent_(True)
+        self.window.setTitlebarSeparatorStyle_(NSTitlebarSeparatorStyleNone)
         self.select("general", animate=False)
+        self.window.center()
 
     def _snapshot(self) -> dict:
         c = self.config
-        return {"version": __version__, "hotkeys": [[key, title] for key, title in cfg.HOTKEY_NAMES.items()],
-                "languages": [[key, title] for key, title in cfg.LANGUAGES.items()], "hotkey": c.hotkey, "language": c.language,
-                "hold_ms": c.hold_ms, "double_tap_ms": c.double_tap_ms, "history_size": c.history_size, "auto_space": c.auto_space,
-                "autostart": autostart.enabled(), "overlay": c.overlay, "overlay_bottom_margin": c.overlay_bottom_margin, "sounds": c.sounds,
-                "streaming": c.streaming, "keep_warm_seconds": c.keep_warm_seconds, "check_updates_on_start": c.check_updates_on_start,
-                "vocabulary": c.vocabulary}
+        return {"version": __version__, "hotkey_title": c.hotkey_title(), "autostart": c.autostart, "overlay": c.overlay,
+                "overlay_bottom_margin": c.overlay_bottom_margin, "sounds": c.sounds, "keep_warm_seconds": c.keep_warm_seconds,
+                "check_updates_on_start": c.check_updates_on_start}
 
     def select(self, identifier: str, animate: bool = True) -> None:
-        pane = self.panes.setdefault(identifier, self.bridge.pane_(identifier))
-        size = pane.frame().size
-        self.toolbar.setSelectedItemIdentifier_(identifier)
-        self.window.setTitle_(next(title for key, title, _ in PANES if key == identifier))
+        self.bridge.stopCapture()
+        if identifier not in self.panes:
+            self.panes[identifier] = self.bridge.pane_(identifier)
+        pane = self.panes[identifier]
+        size = pane.fittingSize()
         self.window.setContentView_(NSView.alloc().initWithFrame_(NSMakeRect(0, 0, size.width, size.height)))
         frame = self.window.frameRectForContentRect_(NSMakeRect(0, 0, size.width, size.height))
         top = self.window.frame().origin.y + self.window.frame().size.height
@@ -118,24 +96,33 @@ class SettingsWindow:
         return bool(self.window.isVisible())
 
     def changed(self, key: str, value: str) -> None:
-        if key == "autostart":
-            (autostart.enable if value.strip().lower() == "true" else autostart.disable)()
-            return self.on_change(key)
+        previous = getattr(self.config, key, None)
         try:
             cfg.set_option(self.config, key, value)
         except (KeyError, ValueError):
             return
-        if key in RESTART_HOTKEY:
+        try:
+            if key == "autostart":
+                (autostart.enable if self.config.autostart else autostart.disable)()
+            cfg.save(self.config)
+        except OSError:
+            setattr(self.config, key, previous)
+            self.bridge.update_(json.dumps(self._snapshot()))
+            logging.getLogger("spoke").exception("Не удалось сохранить настройку %s", key)
+            return
+        if key == "hotkey":
             self.engine.reload_hotkey()
-        elif key == "history_size":
-            self.engine.resize_history()
-        cfg.save(self.config)
+            self.bridge.update_(json.dumps({"hotkey_title": self.config.hotkey_title()}))
         self.on_change(key)
 
     def action(self, name: str) -> None:
         panes = {"open_accessibility": permissions.ACCESSIBILITY_PANE, "open_input": permissions.INPUT_MONITORING_PANE,
                  "open_microphone": "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"}
-        if name in panes:
+        if name in PANES:
+            self.select(name)
+        elif name in ("capture_start", "capture_stop"):
+            self.engine.capturing_shortcut = name == "capture_start"
+        elif name in panes:
             subprocess.run(["open", panes[name]], check=False)
         elif name == "update":
             self.bridge.update_(json.dumps({"update_status": self.on_update()}))

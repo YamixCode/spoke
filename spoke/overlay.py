@@ -1,4 +1,4 @@
-"""Плашка записи внизу экрана, как у Wispr Flow: компактная тёмная «таблетка» с волной от голоса; при постоянной записи — кнопки ✕ и ✓."""
+"""Плашка записи с индикатором голоса и обработки."""
 from __future__ import annotations
 
 import math
@@ -11,7 +11,8 @@ from AppKit import (NSBackingStoreBuffered, NSBezierPath, NSColor, NSMakeRect, N
                     NSWindowCollectionBehaviorStationary, NSWindowStyleMaskBorderless, NSWindowStyleMaskNonactivatingPanel)
 
 HOLD_WIDTH, LOCKED_WIDTH, WORK_WIDTH, HEIGHT, BARS, BUTTON = 72.0, 102.0, 96.0, 30.0, 10, 17.0
-BAR_PITCH, BAR_WIDTH, BAR_MIN, BAR_MAX, SPOKES = 3.8, 2.0, 2.0, 15.0, 8
+BAR_PITCH, BAR_WIDTH, BAR_MIN, BAR_MAX, SPOKES = 3.8, 1.8, 1.8, 14.0, 8
+BAR_GAIN = (0.50, 0.72, 0.60, 0.92, 1.0, 0.82, 0.95, 0.68, 0.76, 0.50)
 RECORD, WORK = "record", "work"
 
 
@@ -49,8 +50,8 @@ class _PillView(NSView):
         pill = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(NSMakeRect(0.5, 0.5, width - 1, HEIGHT - 1), (HEIGHT - 1) / 2, (HEIGHT - 1) / 2)
         NSColor.blackColor().setFill()
         pill.fill()
-        _white(0.14).setStroke()
-        pill.setLineWidth_(1.0)
+        _white(0.10).setStroke()
+        pill.setLineWidth_(0.75)
         pill.stroke()
         if self.mode == RECORD and self.locked:
             cancel, finish = self._button_rects()
@@ -84,7 +85,7 @@ class _PillView(NSView):
                 _white(0.6).setFill()
             else:
                 level = self.levels[i] if self.levels else 0.0
-                height = BAR_MIN + level * (BAR_MAX - BAR_MIN)
+                height = BAR_MIN + level * BAR_GAIN[i] * (BAR_MAX - BAR_MIN)
                 _white(1.0).setFill()
             NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(NSMakeRect(left + i * BAR_PITCH, (HEIGHT - height) / 2, BAR_WIDTH, height), BAR_WIDTH / 2, BAR_WIDTH / 2).fill()
         if working:
@@ -92,11 +93,11 @@ class _PillView(NSView):
             for k in range(SPOKES):
                 angle = math.pi / 2 - k * 2 * math.pi / SPOKES
                 age = (phase - k) % SPOKES
-                NSColor.colorWithCalibratedRed_green_blue_alpha_(0.53, 0.48, 0.76, max(0.16, 1.0 - age * 0.15)).setStroke()
+                NSColor.colorWithCalibratedRed_green_blue_alpha_(0.63, 0.61, 0.76, max(0.12, 0.68 - age * 0.09)).setStroke()
                 spoke = NSBezierPath.bezierPath()
                 spoke.moveToPoint_((cx + 4.4 * math.cos(angle), cy + 4.4 * math.sin(angle)))
                 spoke.lineToPoint_((cx + 8.2 * math.cos(angle), cy + 8.2 * math.sin(angle)))
-                spoke.setLineWidth_(1.7)
+                spoke.setLineWidth_(2.05)
                 spoke.setLineCapStyle_(1)
                 spoke.stroke()
 
@@ -121,6 +122,13 @@ class Overlay:
         self.view.levels = list(self._levels)
         self.view.on_cancel, self.view.on_finish = on_cancel, on_finish
         self.panel.setContentView_(self.view)
+
+    def set_bottom_margin(self, margin: float) -> None:
+        if self.bottom_margin == margin:
+            return
+        self.bottom_margin = margin
+        if self._visible:
+            self._place(self._width)
 
     @staticmethod
     def _dock_visible() -> bool:
@@ -153,6 +161,7 @@ class Overlay:
         if clickable != self._clickable:
             self.panel.setIgnoresMouseEvents_(not clickable)
             self._clickable = clickable
-        self._levels.append(min(1.0, math.sqrt(level) * 3.2))
+        amplitude = min(1.0, math.sqrt(level) * 3.2)
+        self._levels.append(amplitude * 0.72 + self._levels[-1] * 0.28)
         self.view.mode, self.view.locked, self.view.levels = mode, locked, list(self._levels)
         self.view.setNeedsDisplay_(True)
