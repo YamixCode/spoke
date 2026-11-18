@@ -59,6 +59,27 @@ class Config:
         return (f"Термины и имена: {words}." if words else None)
 
 
+BOOLEANS = ("auto_space", "autostart", "overlay", "sounds", "streaming", "check_updates_on_start")
+INTEGERS = ("hold_ms", "double_tap_ms", "history_size", "keep_warm_seconds")
+
+
+def set_option(config: "Config", key: str, text: str) -> None:
+    if key == "vocabulary":
+        config.vocabulary = [line.strip() for line in text.splitlines() if line.strip()]
+    elif key in BOOLEANS and key != "autostart":
+        setattr(config, key, text.strip().lower() == "true")
+    elif key in INTEGERS:
+        setattr(config, key, int(float(text)))
+    elif key == "overlay_bottom_margin":
+        config.overlay_bottom_margin = float(text)
+    elif key == "hotkey" and text in HOTKEYS:
+        config.hotkey = text
+    elif key == "language" and text in LANGUAGES:
+        config.language = text
+    else:
+        raise KeyError(key)
+
+
 def load(path: Path | None = None) -> Config:
     path = Path(path or CONFIG_PATH)
     config = Config()

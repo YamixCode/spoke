@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 import numpy as np
 
 from spoke import config as cfg
@@ -164,3 +166,15 @@ def test_default_config_path_loads_settings_and_migrates_legacy_file(tmp_path, m
     legacy.unlink()
     assert cfg.load().language == "en" and new.exists()
 
+
+
+def test_set_option_parses_values_from_the_settings_window():
+    config = cfg.Config()
+    for key, text in (("hold_ms", "310"), ("history_size", "7.0"), ("overlay", "false"), ("auto_space", "true"), ("overlay_bottom_margin", "22"),
+                      ("hotkey", "right_option"), ("language", "en"), ("vocabulary", " Пётр \n\nKubernetes\n")):
+        cfg.set_option(config, key, text)
+    assert (config.hold_ms, config.history_size, config.overlay, config.auto_space, config.overlay_bottom_margin) == (310, 7, False, True, 22.0)
+    assert (config.hotkey, config.language, config.vocabulary) == ("right_option", "en", ["Пётр", "Kubernetes"])
+    for key, text in (("hotkey", "nonsense"), ("language", "xx"), ("unknown", "1"), ("autostart", "true")):
+        with pytest.raises(KeyError):
+            cfg.set_option(config, key, text)
