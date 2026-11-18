@@ -3,13 +3,18 @@ from __future__ import annotations
 
 import logging
 import queue
-from collections import deque
 import threading
 import time
+from collections import deque
+from pathlib import Path
+
+import numpy as np
 
 from spoke import inject, sounds
 from spoke.config import Config
-from spoke.hotkey import HoldGate, normalize_key
+from spoke.history import HistoryStore
+from spoke.hotkey import HoldGate
+from spoke.keys import KeyListener
 from spoke.recorder import Recorder
 from spoke.streaming import StreamSession
 from spoke.transcribe import SAMPLE_RATE, Transcriber, is_silence
@@ -19,13 +24,18 @@ IDLE, LOADING, RECORDING, WORKING = "idle", "loading", "recording", "working"
 
 
 class Engine:
-    def __init__(self, config: Config, notify=lambda title, text: None, recorder=None, transcriber=None, paste=inject.paste_text):
+    def __init__(self, config: Config, notify=lambda title, text: None, recorder=None, transcriber=None, paste=inject.paste_text,
+                 history_path: Path | None = None, recovery_file: Path | None = None):
         self.config, self.notify, self.paste = config, notify, paste
-        self.recorder = recorder or Recorder(config.max_seconds)
+        self.recovery_file = recovery_file
+        self.recorder = recorder or Recorder(config.max_seconds, recovery_file)
         self.transcriber = transcriber or Transcriber(config.model)
         self.state = LOADING
         self.last_text = ""
         self.history: deque[str] = deque(maxlen=max(1, config.history_size))
+        self._store = HistoryStore(history_path, config.history_size) if history_path else None
+        if self._store and config.save_history:
+            self.history.extend(self._store.load())
         self.last_seconds = 0.0
         self.last_error = ""
         self._session: StreamSession | None = None
@@ -55,15 +65,7 @@ class Engine:
         self._start_listener()
 
     def _start_listener(self) -> None:
-        from pynput import keyboard
-
-        def down(key):
-            self.gate.key_down(normalize_key(key))
-
-        def up(key):
-            self.gate.key_up(normalize_key(key))
-        self._listener = keyboard.Listener(on_press=down, on_release=up)
-        self._listener.daemon = True
+        self._listener = KeyListener(lambda name: self.gate.key_down(name), lambda name: self.gate.key_up(name))
         self._listener.start()
 
     def _prewarm(self) -> None:
@@ -91,6 +93,42 @@ class Engine:
 
     def resize_history(self) -> None:
         self.history = deque(self.history, maxlen=max(1, self.config.history_size))
+
+    def clear_history(self) -> None:
+        self.history.clear()
+        if self._store:
+            self._store.clear()
+
+    def apply_history_setting(self) -> None:
+        if self._store and not self.config.save_history:
+            self._store.clear()
+
+    def _remember(self, text: str) -> None:
+        self.history.appendleft(text)
+        if self._store and self.config.save_history:
+            try:
+                self._store.add(text)
+            except OSError:
+                logger.exception("Не удалось сохранить историю")
+
+    def _discard_journal(self) -> None:
+        if hasattr(self.recorder, "discard_journal"):
+            self.recorder.discard_journal()
+
+    def _recover(self) -> None:
+        path = self.recovery_file
+        if not path or not path.exists():
+            return
+        try:
+            audio = np.fromfile(path, dtype="<i2").astype(np.float32) / 32767
+            if len(audio) >= self.config.min_seconds * SAMPLE_RATE and not is_silence(audio, self.config.silence_rms):
+                text = self.transcriber.transcribe(audio, self.config.whisper_language(), self.config.prompt())
+                if text:
+                    self._remember(text)
+                    self.notify("Spoke", f"Восстановлена несохранённая диктовка ({len(text)} символов): она в истории.")
+            path.unlink(missing_ok=True)
+        except Exception:
+            logger.exception("Не удалось восстановить диктовку")
 
     def _ticker(self) -> None:
         while True:
@@ -158,6 +196,7 @@ class Engine:
             self.last_error = f"модель не загрузилась: {error}"
             logger.exception("Не удалось загрузить модель")
             self.notify("Spoke", "Модель распознавания не загрузилась.")
+        self._recover()
         self.state = IDLE
         while True:
             audio, session = self._jobs.get()
@@ -188,6 +227,7 @@ class Engine:
                 used = True
                 text = session.finish(audio) if session is not None else self.transcriber.transcribe(audio, self.config.whisper_language(), self.config.prompt())
                 if text:
+                    self._remember(text)
                     self.paste(self._joined(text), self.config.restore_clipboard, self.config.trailing_space)
                     self._last_paste_at = time.monotonic()
         except Exception as error:
@@ -198,8 +238,7 @@ class Engine:
             sounds.play(sounds.ERROR, self.config.sounds)
         else:
             self.last_text, self.last_seconds, self.last_error = text, time.monotonic() - started, ""
-            if text:
-                self.history.appendleft(text)
+            self._discard_journal()
             logger.info("записано %.1f с, обработано за %.1f с, символов %d", seconds, self.last_seconds, len(text))
         finally:
             if session is not None and not used:
