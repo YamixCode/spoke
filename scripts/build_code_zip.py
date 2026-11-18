@@ -17,7 +17,7 @@ def version() -> str:
 
 
 def build_native(required: bool) -> None:
-    if shutil.which("swiftc"):
+    if sys.platform == "darwin" and shutil.which("swiftc"):
         subprocess.run([str(ROOT / "scripts" / "build_native.sh")], check=True)
     elif required:
         raise SystemExit("swiftc не найден: библиотеку окна настроек нужно собирать на macOS")
