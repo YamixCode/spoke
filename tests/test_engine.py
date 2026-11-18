@@ -92,6 +92,17 @@ def test_filters_and_config(tmp_path):
     assert cfg.load(path).whisper_language() is None
 
 
+def test_app_defaults_apply_to_saved_configuration(tmp_path):
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({"hotkey": "key:0:1048576:⌘A", "language": "ru", "history_size": 3,
+                                "auto_space": False, "streaming": False, "autostart": False}), encoding="utf-8")
+    loaded = cfg.load(path)
+    loaded.apply_app_defaults()
+    assert loaded.hotkey_title() == "⌘A" and not loaded.autostart
+    assert (loaded.whisper_language(), loaded.history_size, loaded.auto_space, loaded.streaming) == (None, 15, True, True)
+    assert cfg.Config().autostart
+
+
 def test_consecutive_pastes_are_separated_by_space_but_first_is_not():
     engine, pasted = make(speech(), text="Первая фраза.")
     engine.process(speech())
@@ -157,7 +168,7 @@ def test_default_config_path_loads_settings_and_migrates_legacy_file(tmp_path, m
     new, legacy = tmp_path / "spoke" / "config.json", tmp_path / "localflow" / "config.json"
     monkeypatch.setattr(cfg, "CONFIG_PATH", new)
     monkeypatch.setattr(cfg, "LEGACY_CONFIG_PATH", legacy)
-    assert cfg.load().language == "ru"
+    assert cfg.load().language == "auto"
     legacy.parent.mkdir()
     legacy.write_text(json.dumps({"language": "en", "history_size": 3}))
     loaded = cfg.load()
@@ -175,6 +186,6 @@ def test_set_option_parses_values_from_the_settings_window():
         cfg.set_option(config, key, text)
     assert (config.hold_ms, config.history_size, config.overlay, config.auto_space, config.overlay_bottom_margin) == (310, 7, False, True, 22.0)
     assert (config.hotkey, config.language, config.vocabulary) == ("right_option", "en", ["Пётр", "Kubernetes"])
-    for key, text in (("hotkey", "nonsense"), ("language", "xx"), ("unknown", "1"), ("autostart", "true")):
+    for key, text in (("hotkey", "nonsense"), ("language", "xx"), ("unknown", "1")):
         with pytest.raises(KeyError):
             cfg.set_option(config, key, text)

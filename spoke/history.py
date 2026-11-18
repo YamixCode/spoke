@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import json
-import os
+import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -10,6 +11,7 @@ from pathlib import Path
 class HistoryStore:
     def __init__(self, path: Path, limit: int = 50):
         self.path, self.limit = path, max(1, limit)
+        self._lock = threading.Lock()
 
     def load(self) -> list[str]:
         texts = []
@@ -24,13 +26,23 @@ class HistoryStore:
         return texts[-self.limit:][::-1]
 
     def add(self, text: str) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        descriptor = os.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-        with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
-            handle.write(json.dumps({"time": time.strftime("%Y-%m-%dT%H:%M:%S"), "text": text}, ensure_ascii=False) + "\n")
-        lines = self.path.read_text(encoding="utf-8").splitlines()
-        if len(lines) > self.limit * 4:
-            self.path.write_text("\n".join(lines[-self.limit:]) + "\n", encoding="utf-8")
+        line = json.dumps({"time": time.strftime("%Y-%m-%dT%H:%M:%S"), "text": text}, ensure_ascii=False)
+        with self._lock:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                lines = self.path.read_text(encoding="utf-8").splitlines()
+            except FileNotFoundError:
+                lines = []
+            lines.append(line)
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.path.parent, delete=False) as handle:
+                pending = Path(handle.name)
+                try:
+                    handle.write("\n".join(lines[-self.limit:]) + "\n")
+                    handle.close()
+                    pending.replace(self.path)
+                finally:
+                    pending.unlink(missing_ok=True)
 
     def clear(self) -> None:
-        self.path.unlink(missing_ok=True)
+        with self._lock:
+            self.path.unlink(missing_ok=True)

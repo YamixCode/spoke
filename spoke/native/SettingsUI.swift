@@ -1,66 +1,74 @@
 import AppKit
 import SwiftUI
 
-final class SettingsModel: ObservableObject {
-    struct Option: Hashable { let key: String; let title: String }
+private let modifierKeys: [UInt16: (NSEvent.ModifierFlags, String)] = [
+    54: (.command, "Правый ⌘"), 55: (.command, "⌘"), 56: (.shift, "⇧"),
+    58: (.option, "⌥"), 59: (.control, "Ctrl"), 60: (.shift, "Правый ⇧"), 61: (.option, "Правый ⌥"),
+    62: (.control, "Правый Ctrl"), 63: (.function, "Fn")
+]
+private let shortcutModifiers: [(NSEvent.ModifierFlags, String)] = [
+    (.control, "⌃"), (.shift, "⇧"), (.option, "⌥"), (.command, "⌘"), (.function, "Fn")
+]
+private let specialKeys: [UInt16: String] = [
+    36: "Return", 48: "Tab", 49: "Пробел", 51: "Delete", 53: "Esc", 76: "Enter",
+    114: "Help", 115: "Home", 116: "Page Up", 117: "⌦", 119: "End", 121: "Page Down",
+    123: "←", 124: "→", 125: "↓", 126: "↑"
+]
+private let functionKeys: [UInt16] = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113, 106, 64, 79, 80, 90]
+private let modifierMask = NSEvent.ModifierFlags(shortcutModifiers.map(\.0))
 
-    var suppress = true
+final class SettingsModel: ObservableObject {
     weak var delegate: NSObject?
-    let hotkeys: [Option]
-    let languages: [Option]
     let version: String
 
-    @Published var hotkey: String { didSet { send("hotkey", hotkey) } }
-    @Published var language: String { didSet { send("language", language) } }
-    @Published var holdMs: Double { didSet { if holdMs.rounded() != oldValue.rounded() { send("hold_ms", Int(holdMs)) } } }
-    @Published var doubleTapMs: Double { didSet { if doubleTapMs.rounded() != oldValue.rounded() { send("double_tap_ms", Int(doubleTapMs)) } } }
-    @Published var historySize: Int { didSet { send("history_size", historySize) } }
-    @Published var autoSpace: Bool { didSet { send("auto_space", autoSpace) } }
+    @Published var hotkeyTitle: String
+    @Published var capturing = false
     @Published var autostart: Bool { didSet { send("autostart", autostart) } }
     @Published var overlay: Bool { didSet { send("overlay", overlay) } }
     @Published var overlayMargin: Double { didSet { if overlayMargin.rounded() != oldValue.rounded() { send("overlay_bottom_margin", Int(overlayMargin)) } } }
     @Published var sounds: Bool { didSet { send("sounds", sounds) } }
-    @Published var streaming: Bool { didSet { send("streaming", streaming) } }
-    @Published var keepWarm: Int { didSet { send("keep_warm_seconds", keepWarm) } }
+    @Published var keepWarm: Bool { didSet {
+        if oldValue != keepWarm { send("keep_warm_seconds", keepWarm ? warmInterval : 0) }
+    } }
     @Published var checkUpdates: Bool { didSet { send("check_updates_on_start", checkUpdates) } }
-    @Published var vocabulary: String { didSet { send("vocabulary", vocabulary) } }
     @Published var accessibility = ""
     @Published var inputMonitoring = ""
     @Published var microphone = ""
     @Published var updateStatus = ""
 
+    private let warmInterval: Int
+    private var suppress = false
+    private var monitor: Any?
+    private var pendingKey: (code: UInt16, flags: NSEvent.ModifierFlags, title: String)?
+    private var pendingModifier: (code: UInt16, flags: NSEvent.ModifierFlags, title: String)?
+
     init(json: [String: Any], delegate: NSObject) {
-        func options(_ name: String) -> [Option] {
-            (json[name] as? [[String]] ?? []).map { Option(key: $0[0], title: $0[1]) }
-        }
         self.delegate = delegate
-        hotkeys = options("hotkeys")
-        languages = options("languages")
         version = json["version"] as? String ?? ""
-        hotkey = json["hotkey"] as? String ?? "ctrl"
-        language = json["language"] as? String ?? "ru"
-        holdMs = json["hold_ms"] as? Double ?? 250
-        doubleTapMs = json["double_tap_ms"] as? Double ?? 400
-        historySize = json["history_size"] as? Int ?? 10
-        autoSpace = json["auto_space"] as? Bool ?? true
-        autostart = json["autostart"] as? Bool ?? false
+        hotkeyTitle = json["hotkey_title"] as? String ?? "Ctrl"
+        autostart = json["autostart"] as? Bool ?? true
         overlay = json["overlay"] as? Bool ?? true
         overlayMargin = json["overlay_bottom_margin"] as? Double ?? 14
         sounds = json["sounds"] as? Bool ?? false
-        streaming = json["streaming"] as? Bool ?? true
-        keepWarm = json["keep_warm_seconds"] as? Int ?? 45
+        let interval = json["keep_warm_seconds"] as? Int ?? 45
+        warmInterval = interval > 0 ? interval : 45
+        keepWarm = interval > 0
         checkUpdates = json["check_updates_on_start"] as? Bool ?? true
-        vocabulary = (json["vocabulary"] as? [String] ?? []).joined(separator: "\n")
-        suppress = false
     }
 
     func apply(_ json: [String: Any]) {
         suppress = true
-        accessibility = json["accessibility"] as? String ?? accessibility
-        inputMonitoring = json["input_monitoring"] as? String ?? inputMonitoring
-        microphone = json["microphone"] as? String ?? microphone
-        updateStatus = json["update_status"] as? String ?? updateStatus
-        if let value = json["autostart"] as? Bool { autostart = value }
+        if let value = json["accessibility"] as? String, value != accessibility { accessibility = value }
+        if let value = json["input_monitoring"] as? String, value != inputMonitoring { inputMonitoring = value }
+        if let value = json["microphone"] as? String, value != microphone { microphone = value }
+        if let value = json["update_status"] as? String, value != updateStatus { updateStatus = value }
+        if let value = json["autostart"] as? Bool, value != autostart { autostart = value }
+        if let value = json["overlay"] as? Bool, value != overlay { overlay = value }
+        if let value = json["overlay_bottom_margin"] as? Double, value != overlayMargin { overlayMargin = value }
+        if let value = json["sounds"] as? Bool, value != sounds { sounds = value }
+        if let value = json["keep_warm_seconds"] as? Int, (value > 0) != keepWarm { keepWarm = value > 0 }
+        if let value = json["check_updates_on_start"] as? Bool, value != checkUpdates { checkUpdates = value }
+        if let value = json["hotkey_title"] as? String, value != hotkeyTitle { hotkeyTitle = value }
         suppress = false
     }
 
@@ -72,132 +80,199 @@ final class SettingsModel: ObservableObject {
     func act(_ name: String) {
         _ = delegate?.perform(NSSelectorFromString("settingAction:"), with: name as NSString)
     }
+
+    func startCapture() {
+        guard monitor == nil else { return }
+        capturing = true
+        act("capture_start")
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.flagsChanged, .keyDown, .keyUp]) { [weak self] event in
+            guard let self else { return event }
+            self.handleCapture(event)
+            return nil
+        }
+        if monitor == nil { stopCapture() }
+    }
+
+    func stopCapture() {
+        guard capturing else { return }
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+        pendingKey = nil
+        pendingModifier = nil
+        capturing = false
+        act("capture_stop")
+    }
+
+    private func handleCapture(_ event: NSEvent) {
+        let code = event.keyCode
+        let flags = event.modifierFlags.intersection(modifierMask)
+        if event.type == .flagsChanged, pendingKey == nil, let (flag, title) = modifierKeys[code] {
+            if event.modifierFlags.contains(flag) {
+                pendingModifier = (code, flags.subtracting(flag), title)
+            } else if let choice = pendingModifier {
+                accept(choice)
+            }
+        } else if event.type == .keyDown, !event.isARepeat, pendingKey == nil {
+            let function = functionKeys.firstIndex(of: code).map { "F\($0 + 1)" }
+            let character = event.charactersIgnoringModifiers?.trimmingCharacters(in: .controlCharacters)
+            let title = specialKeys[code] ?? function ?? character.flatMap { $0.isEmpty ? nil : $0.uppercased() } ?? "Клавиша \(code)"
+            let modifiers = function != nil || (114...126).contains(code) ? flags.subtracting(.function) : flags
+            pendingKey = (code, modifiers, title)
+        } else if event.type == .keyUp, let choice = pendingKey, choice.code == code {
+            accept(choice)
+        }
+    }
+
+    private func accept(_ choice: (code: UInt16, flags: NSEvent.ModifierFlags, title: String)) {
+        let symbols = shortcutModifiers.filter { choice.flags.contains($0.0) }.map(\.1).joined()
+        let title = symbols + choice.title
+        send("hotkey", "key:\(choice.code):\(choice.flags.rawValue):\(title)")
+        stopCapture()
+    }
 }
 
-struct SliderRow: View {
-    let title: String
-    @Binding var value: Double
-    let range: ClosedRange<Double>
-    let unit: String
+private enum Pane: String, CaseIterable {
+    case general, overlay, system
 
-    var body: some View {
-        LabeledContent(title) {
-            HStack {
-                Slider(value: $value, in: range).frame(width: 170)
-                Text("\(Int(value)) \(unit)").monospacedDigit().frame(width: 62, alignment: .trailing).foregroundStyle(.secondary)
-            }
+    var title: String {
+        switch self {
+        case .general: return "Основные"
+        case .overlay: return "Плашка и звук"
+        case .system: return "Система"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .general: return "gearshape"
+        case .overlay: return "waveform"
+        case .system: return "lock.shield"
         }
     }
 }
 
-struct Footer: View {
-    let text: String
+private struct PaneNavigation: View {
+    let selected: Pane
+    let choose: (Pane) -> Void
 
-    var body: some View {
-        Text(text).frame(maxWidth: .infinity, alignment: .leading).multilineTextAlignment(.leading)
-    }
-}
-
-struct GeneralPane: View {
-    @ObservedObject var m: SettingsModel
-
-    var body: some View {
-        Form {
-            Section {
-                Picker("Клавиша диктовки", selection: $m.hotkey) { ForEach(m.hotkeys, id: \.key) { Text($0.title).tag($0.key) } }
-                SliderRow(title: "Удержание до записи", value: $m.holdMs, range: 100...800, unit: "мс")
-                SliderRow(title: "Двойное нажатие", value: $m.doubleTapMs, range: 200...800, unit: "мс")
-            } footer: {
-                Footer(text: "Два быстрых нажатия включают постоянную запись.")
-            }
-            Section {
-                Picker("Язык речи", selection: $m.language) { ForEach(m.languages, id: \.key) { Text($0.title).tag($0.key) } }
-                Stepper(value: $m.historySize, in: 1...50) { Text("Помнить последних диктовок: \(m.historySize)") }
-                Toggle("Ставить пробел между вставками", isOn: $m.autoSpace)
-            }
-            Section {
-                Toggle("Запускать при входе в систему", isOn: $m.autostart)
-            }
-        }
-        .formStyle(.grouped)
-        .scrollDisabled(true)
-    }
-}
-
-struct OverlayPane: View {
-    @ObservedObject var m: SettingsModel
-
-    var body: some View {
-        Form {
-            Section {
-                Toggle("Показывать плашку записи", isOn: $m.overlay)
-                SliderRow(title: "Высота над Dock", value: $m.overlayMargin, range: 0...80, unit: "пт")
-            } footer: {
-                Footer(text: "Если Dock скрыт, отсчёт идёт от низа экрана.")
-            }
-            Section {
-                Toggle("Звук в начале и конце записи", isOn: $m.sounds)
-            }
-            Section {
-                Toggle("Распознавать, пока вы говорите", isOn: $m.streaming)
-            } footer: {
-                Footer(text: "Быстрее на длинных диктовках; числа иногда пишутся иначе.")
-            }
-        }
-        .formStyle(.grouped)
-        .scrollDisabled(true)
-    }
-}
-
-struct VocabularyPane: View {
-    @ObservedObject var m: SettingsModel
-
-    var body: some View {
-        Form {
-            Section {
-                TextEditor(text: $m.vocabulary).font(.body).frame(minHeight: 200)
-            } header: {
-                Text("Имена и термины")
-            } footer: {
-                Footer(text: "По одному в строке, например Пётр или Kubernetes. Whisper будет писать их именно так.")
-            }
-        }
-        .formStyle(.grouped)
-        .scrollDisabled(true)
-    }
-}
-
-struct SystemPane: View {
-    @ObservedObject var m: SettingsModel
-
-    var body: some View {
-        Form {
-            Section("Разрешения") {
-                LabeledContent("Универсальный доступ") { HStack { Text(m.accessibility).foregroundStyle(.secondary); Button("Открыть…") { m.act("open_accessibility") } } }
-                LabeledContent("Мониторинг ввода") { HStack { Text(m.inputMonitoring).foregroundStyle(.secondary); Button("Открыть…") { m.act("open_input") } } }
-                LabeledContent("Микрофон") { HStack { Text(m.microphone).foregroundStyle(.secondary); Button("Открыть…") { m.act("open_microphone") } } }
-            }
-            Section {
-                Stepper(value: $m.keepWarm, in: 0...300, step: 5) {
-                    Text(m.keepWarm == 0 ? "Поддержание модели выключено" : "Поддерживать модель каждые \(m.keepWarm) с")
-                }
-            } footer: {
-                Footer(text: "Без этого первая диктовка после паузы идёт 5–15 секунд.")
-            }
-            Section("Приложение") {
-                LabeledContent("Версия", value: m.version)
-                LabeledContent("Обновления") {
-                    HStack {
-                        if !m.updateStatus.isEmpty { Text(m.updateStatus).foregroundStyle(.secondary).font(.callout) }
-                        Button("Проверить…") { m.act("update") }
+    private var buttons: some View {
+        HStack(spacing: 6) {
+            ForEach(Pane.allCases, id: \.self) { pane in
+                Button { choose(pane) } label: {
+                    VStack(spacing: 4) {
+                        Image(systemName: pane.icon).font(.system(size: 17, weight: .medium)).accessibilityHidden(true)
+                        Text(pane.title).font(.callout)
                     }
+                    .foregroundStyle(pane == selected ? Color.accentColor : Color.secondary)
+                    .frame(width: 108, height: 45)
+                    .background(pane == selected ? Color.accentColor.opacity(0.13) : .clear, in: Capsule())
+                    .contentShape(Capsule())
                 }
-                Toggle("Проверять обновления при запуске", isOn: $m.checkUpdates)
-                LabeledContent("Журнал") { Button("Показать в Finder") { m.act("show_log") } }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(pane == selected ? .isSelected : [])
             }
         }
-        .formStyle(.grouped)
-        .scrollDisabled(true)
+        .padding(4)
+    }
+
+    var body: some View {
+        #if compiler(>=6.2)
+        if #available(macOS 26, *) {
+            buttons.glassEffect(.regular, in: .capsule)
+        } else {
+            buttons.background(.regularMaterial, in: Capsule())
+        }
+        #else
+        buttons.background(.regularMaterial, in: Capsule())
+        #endif
+    }
+}
+
+private struct SettingsPane: View {
+    @ObservedObject var model: SettingsModel
+    let pane: Pane
+
+    var body: some View {
+        VStack(spacing: 24) {
+            PaneNavigation(selected: pane) { model.act($0.rawValue) }
+            VStack(alignment: .leading, spacing: 15) {
+                switch pane {
+                case .general: general
+                case .overlay: overlay
+                case .system: system
+                }
+            }
+            .frame(maxWidth: .infinity)
+        }
+        .padding(.horizontal, 48)
+        .padding(.top, 10)
+        .padding(.bottom, 26)
+        .frame(width: 536)
+    }
+
+    private var general: some View {
+        Group {
+            row("Клавиша диктовки") {
+                Button(model.capturing ? "Отменить" : model.hotkeyTitle) {
+                    if model.capturing { model.stopCapture() } else { model.startCapture() }
+                }
+                .accessibilityLabel(model.capturing ? "Отменить выбор клавиши" : "Клавиша диктовки: \(model.hotkeyTitle). Изменить")
+            }
+            Text(model.capturing ? "Нажмите и отпустите клавишу или сочетание." : "Нажмите на клавишу в настройках, чтобы назначить другую.")
+                .font(.callout).foregroundStyle(.secondary)
+            Divider()
+            Toggle("Запускать при входе в систему", isOn: $model.autostart).toggleStyle(.checkbox)
+        }
+    }
+
+    private var overlay: some View {
+        Group {
+            Toggle("Показывать плашку записи", isOn: $model.overlay).toggleStyle(.checkbox)
+            row("Высота над Dock") {
+                Slider(value: $model.overlayMargin, in: 0...80, step: 1).frame(width: 145).accessibilityLabel("Высота над Dock")
+                Text("\(Int(model.overlayMargin)) пт").monospacedDigit().foregroundStyle(.secondary).frame(width: 42, alignment: .trailing)
+            }
+            .disabled(!model.overlay)
+            Text("Когда Dock скрыт, высота отсчитывается от края экрана.").font(.callout).foregroundStyle(.secondary)
+            Divider()
+            Toggle("Звук в начале и конце записи", isOn: $model.sounds).toggleStyle(.checkbox)
+        }
+    }
+
+    private var system: some View {
+        Group {
+            Text("Разрешения").font(.headline)
+            permission("Универсальный доступ", model.accessibility, "open_accessibility")
+            permission("Мониторинг ввода", model.inputMonitoring, "open_input")
+            permission("Микрофон", model.microphone, "open_microphone")
+            Divider()
+            Toggle("Ускорять диктовку после простоя", isOn: $model.keepWarm).toggleStyle(.checkbox)
+            Text("Spoke периодически прогревает модель, чтобы первая фраза после паузы обработалась быстрее.")
+                .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            Divider()
+            row("Версия") { Text(model.version).foregroundStyle(.secondary) }
+            row("Обновления") {
+                Text(model.updateStatus).font(.callout).foregroundStyle(.secondary).lineLimit(1)
+                Button("Проверить…") { model.act("update") }
+            }
+            Toggle("Проверять обновления при запуске", isOn: $model.checkUpdates).toggleStyle(.checkbox)
+            row("Журнал") { Button("Показать в Finder") { model.act("show_log") } }
+        }
+    }
+
+    private func row<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        HStack {
+            Text(title)
+            Spacer()
+            content()
+        }
+    }
+
+    private func permission(_ title: String, _ status: String, _ action: String) -> some View {
+        row(title) {
+            Text(status).font(.callout).foregroundStyle(.secondary)
+            Button("Открыть…") { model.act(action) }.accessibilityLabel("Открыть настройки: \(title)")
+        }
     }
 }
 
@@ -212,20 +287,17 @@ public final class SpokeSettingsBridge: NSObject {
     }
 
     @objc public func pane(_ identifier: String) -> NSView {
-        let view: AnyView
-        switch identifier {
-        case "overlay": view = AnyView(OverlayPane(m: model).frame(width: 560))
-        case "vocabulary": view = AnyView(VocabularyPane(m: model).frame(width: 560))
-        case "system": view = AnyView(SystemPane(m: model).frame(width: 560))
-        default: view = AnyView(GeneralPane(m: model).frame(width: 560))
-        }
-        let host = NSHostingView(rootView: view)
-        host.frame = NSRect(x: 0, y: 0, width: 560, height: host.fittingSize.height)
+        let host = NSHostingView(rootView: SettingsPane(model: model, pane: Pane(rawValue: identifier) ?? .general))
+        host.setFrameSize(host.fittingSize)
         return host
+    }
+
+    @objc public func stopCapture() {
+        model.stopCapture()
     }
 
     @objc public func update(_ config: String) {
         let json = (try? JSONSerialization.jsonObject(with: Data(config.utf8))) as? [String: Any] ?? [:]
-        DispatchQueue.main.async { self.model.apply(json) }
+        model.apply(json)
     }
 }

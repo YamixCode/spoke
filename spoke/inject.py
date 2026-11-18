@@ -7,6 +7,8 @@ import subprocess
 import threading
 import time
 
+from spoke.keys import REPLAY_MARKER
+
 _ENV = {**os.environ, "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8"}
 
 
@@ -27,6 +29,7 @@ def press_cmd_v() -> None:
     for pressed in (True, False):
         event = Quartz.CGEventCreateKeyboardEvent(source, 9, pressed)
         Quartz.CGEventSetFlags(event, Quartz.kCGEventFlagMaskCommand)
+        Quartz.CGEventSetIntegerValueField(event, Quartz.kCGEventSourceUserData, REPLAY_MARKER)
         Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
 
 

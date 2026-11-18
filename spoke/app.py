@@ -11,12 +11,11 @@ import rumps
 from AppKit import NSImage
 from Foundation import NSActivityLatencyCritical, NSActivityUserInitiatedAllowingIdleSystemSleep, NSProcessInfo
 
-from spoke import __version__, config as cfg, inject, permissions, updater
+from spoke import __version__, autostart, config as cfg, inject, permissions, updater
 from spoke.settings import SettingsWindow
 from spoke.overlay import RECORD, WORK, Overlay
 from spoke.engine import IDLE, LOADING, RECORDING, WORKING, Engine
 
-LOCKED_STATUS = "Постоянная запись: Ctrl — завершить, Esc — отмена"
 ASSETS = Path(__file__).resolve().parent / "assets"
 ICONS = {LOADING: ("menu_loading.png", True), IDLE: ("menu_idle.png", True), RECORDING: ("menu_recording.png", False), WORKING: ("menu_working.png", True)}
 ICON_POINTS = 22.0
@@ -108,7 +107,7 @@ class SpokeApp(rumps.App):
             self.overlay.update(None)
             self.overlay = None
         if self.overlay is not None:
-            self.overlay.bottom_margin = self.config.overlay_bottom_margin
+            self.overlay.set_bottom_margin(self.config.overlay_bottom_margin)
 
     def _open_permissions(self, _) -> None:
         permissions.open_settings()
@@ -142,7 +141,10 @@ class SpokeApp(rumps.App):
         state = self.engine.state
         self._show_icon(state)
         self._check_permissions()
-        self.status_item.title = LOCKED_STATUS if state == RECORDING and self.engine.locked else STATUS.get(state, "")
+        if state == RECORDING and self.engine.locked:
+            self.status_item.title = f"Постоянная запись: {self.config.hotkey_title()} — завершить, Esc — отмена"
+        else:
+            self.status_item.title = STATUS.get(state, "")
         if not self._permissions_ok:
             self.status_item.title = "⚠️ Нужны разрешения: нажмите, чтобы открыть настройки"
             self.status_item.set_callback(self._open_permissions)
@@ -199,6 +201,12 @@ def run() -> None:
         NSActivityUserInitiatedAllowingIdleSystemSleep | NSActivityLatencyCritical, "Spoke: мгновенная диктовка без App Nap")
     logging.basicConfig(filename=os.path.expanduser("~/Library/Logs/Spoke.log"), level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     config = cfg.load()
+    config.apply_app_defaults()
     if not cfg.CONFIG_PATH.exists():
         cfg.save(config)
+    if os.environ.get("RESOURCEPATH") and config.autostart != autostart.enabled():
+        try:
+            (autostart.enable if config.autostart else autostart.disable)()
+        except OSError:
+            logging.getLogger("spoke").exception("Не удалось настроить запуск при входе")
     SpokeApp(config).run()
