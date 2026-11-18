@@ -39,7 +39,6 @@ class Config:
     chunk_pause_seconds: float = 0.6
     keep_warm_seconds: int = 45
     check_updates_on_start: bool = True
-    github_token: str = ""
     history_size: int = 10
     double_tap_ms: int = 400
     locked_max_seconds: int = 1800
@@ -53,7 +52,7 @@ class Config:
         return None if self.language == "auto" else self.language
 
     def token(self) -> str:
-        return self.github_token or os.environ.get("SPOKE_GITHUB_TOKEN", "")
+        return os.environ.get("SPOKE_GITHUB_TOKEN", "")
 
     def prompt(self) -> str | None:
         words = ", ".join(self.vocabulary)
