@@ -149,3 +149,18 @@ def test_history_keeps_recent_dictations_and_pastes_chosen_one(monkeypatch):
     assert engine.paste_from_history(1) and not engine.paste_from_history(5)
     t.sleep(0.5)
     assert pasted == [("Два.", True, False)]
+
+
+def test_default_config_path_loads_settings_and_migrates_legacy_file(tmp_path, monkeypatch):
+    new, legacy = tmp_path / "spoke" / "config.json", tmp_path / "localflow" / "config.json"
+    monkeypatch.setattr(cfg, "CONFIG_PATH", new)
+    monkeypatch.setattr(cfg, "LEGACY_CONFIG_PATH", legacy)
+    assert cfg.load().language == "ru"
+    legacy.parent.mkdir()
+    legacy.write_text(json.dumps({"language": "en", "history_size": 3}))
+    loaded = cfg.load()
+    assert loaded.language == "en" and loaded.history_size == 3
+    cfg.save(loaded)
+    legacy.unlink()
+    assert cfg.load().language == "en" and new.exists()
+

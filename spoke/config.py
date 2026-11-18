@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 CONFIG_PATH = Path(os.environ.get("SPOKE_CONFIG") or Path.home() / ".config" / "spoke" / "config.json")
+LEGACY_CONFIG_PATH = Path.home() / ".config" / "localflow" / "config.json"
 DEFAULT_MODEL = "mlx-community/whisper-large-v3-turbo"
 
 
