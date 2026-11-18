@@ -10,9 +10,13 @@ from AppKit import (NSBackingStoreBuffered, NSBezierPath, NSColor, NSMakeRect, N
                     NSWindowCollectionBehaviorCanJoinAllSpaces, NSWindowCollectionBehaviorFullScreenAuxiliary,
                     NSWindowCollectionBehaviorStationary, NSWindowStyleMaskBorderless, NSWindowStyleMaskNonactivatingPanel)
 
-HOLD_WIDTH, LOCKED_WIDTH, WORK_WIDTH, HEIGHT, BARS, BUTTON = 72.0, 102.0, 96.0, 30.0, 10, 17.0
-BAR_PITCH, BAR_WIDTH, BAR_MIN, BAR_MAX, SPOKES = 3.8, 1.8, 1.8, 14.0, 8
-BAR_GAIN = (0.50, 0.72, 0.60, 0.92, 1.0, 0.82, 0.95, 0.68, 0.76, 0.50)
+HOLD_WIDTH, LOCKED_WIDTH, WORK_WIDTH, HEIGHT = 70.0, 100.0, 96.0, 28.0
+BUTTON, BUTTON_INSET = 16.0, 7.0
+BAR_PITCH, BAR_WIDTH, BAR_MIN, BAR_MAX, SPOKES = 4.0, 1.6, 1.6, 13.0, 8
+BAR_GAIN = (0.48, 0.62, 0.77, 0.92, 1.0, 0.92, 0.77, 0.62, 0.48)
+BARS = len(BAR_GAIN)
+BAR_LAG = (2, 1, 1, 0, 0, 0, 1, 1, 2)
+LEVEL_SAMPLES = max(BAR_LAG) + 1
 RECORD, WORK = "record", "work"
 
 
@@ -33,7 +37,7 @@ class _PillView(NSView):
     def _button_rects(self):
         width = self.bounds().size.width
         y = (HEIGHT - BUTTON) / 2
-        return NSMakeRect(7, y, BUTTON, BUTTON), NSMakeRect(width - 7 - BUTTON, y, BUTTON, BUTTON)
+        return NSMakeRect(BUTTON_INSET, y, BUTTON, BUTTON), NSMakeRect(width - BUTTON_INSET - BUTTON, y, BUTTON, BUTTON)
 
     def mouseDown_(self, event):
         if not (self.mode == RECORD and self.locked):
@@ -41,40 +45,39 @@ class _PillView(NSView):
         point = self.convertPoint_fromView_(event.locationInWindow(), None)
         cancel, finish = self._button_rects()
         for rect, handler in ((cancel, self.on_cancel), (finish, self.on_finish)):
-            if rect.origin.x <= point.x <= rect.origin.x + rect.size.width and handler:
+            if rect.origin.x - 2 <= point.x <= rect.origin.x + rect.size.width + 2 and handler:
                 handler()
                 return
 
     def drawRect_(self, rect):
         width = self.bounds().size.width
-        pill = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(NSMakeRect(0.5, 0.5, width - 1, HEIGHT - 1), (HEIGHT - 1) / 2, (HEIGHT - 1) / 2)
+        pill = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(self.bounds(), HEIGHT / 2, HEIGHT / 2)
         NSColor.blackColor().setFill()
         pill.fill()
-        _white(0.10).setStroke()
-        pill.setLineWidth_(0.75)
-        pill.stroke()
         if self.mode == RECORD and self.locked:
             cancel, finish = self._button_rects()
             NSColor.colorWithCalibratedRed_green_blue_alpha_(0.29, 0.27, 0.25, 1.0).setFill()
             NSBezierPath.bezierPathWithOvalInRect_(cancel).fill()
             _white(1.0).setStroke()
             cross = NSBezierPath.bezierPath()
-            cx, cy, r = cancel.origin.x + BUTTON / 2, cancel.origin.y + BUTTON / 2, 3.0
+            cx, cy, r = cancel.origin.x + BUTTON / 2, cancel.origin.y + BUTTON / 2, 2.6
             cross.moveToPoint_((cx - r, cy - r))
             cross.lineToPoint_((cx + r, cy + r))
             cross.moveToPoint_((cx - r, cy + r))
             cross.lineToPoint_((cx + r, cy - r))
-            cross.setLineWidth_(1.5)
+            cross.setLineWidth_(1.35)
+            cross.setLineCapStyle_(1)
             cross.stroke()
             _white(1.0).setFill()
             NSBezierPath.bezierPathWithOvalInRect_(finish).fill()
             NSColor.blackColor().setStroke()
             tick = NSBezierPath.bezierPath()
             fx, fy = finish.origin.x + BUTTON / 2, finish.origin.y + BUTTON / 2
-            tick.moveToPoint_((fx - 3.4, fy - 0.2))
-            tick.lineToPoint_((fx - 1.0, fy - 2.8))
-            tick.lineToPoint_((fx + 3.6, fy + 3.0))
-            tick.setLineWidth_(1.7)
+            tick.moveToPoint_((fx - 3.1, fy - 0.1))
+            tick.lineToPoint_((fx - 0.9, fy - 2.4))
+            tick.lineToPoint_((fx + 3.3, fy + 2.7))
+            tick.setLineWidth_(1.45)
+            tick.setLineCapStyle_(1)
             tick.stroke()
         working = self.mode == WORK
         left = 17.0 if working else (width - (BARS - 1) * BAR_PITCH - BAR_WIDTH) / 2
@@ -84,7 +87,7 @@ class _PillView(NSView):
                 height = BAR_MIN
                 _white(0.6).setFill()
             else:
-                level = self.levels[i] if self.levels else 0.0
+                level = self.levels[-1 - BAR_LAG[i]] if self.levels else 0.0
                 height = BAR_MIN + level * BAR_GAIN[i] * (BAR_MAX - BAR_MIN)
                 _white(1.0).setFill()
             NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(NSMakeRect(left + i * BAR_PITCH, (HEIGHT - height) / 2, BAR_WIDTH, height), BAR_WIDTH / 2, BAR_WIDTH / 2).fill()
@@ -105,7 +108,7 @@ class _PillView(NSView):
 class Overlay:
     def __init__(self, bottom_margin: float = 14.0, on_cancel=None, on_finish=None):
         self.bottom_margin = bottom_margin
-        self._levels = deque([0.0] * BARS, maxlen=BARS)
+        self._levels = deque([0.0] * LEVEL_SAMPLES, maxlen=LEVEL_SAMPLES)
         self._visible = False
         self._clickable = False
         self._width = HOLD_WIDTH
@@ -113,7 +116,7 @@ class Overlay:
             NSMakeRect(0, 0, HOLD_WIDTH, HEIGHT), NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel, NSBackingStoreBuffered, False)
         self.panel.setOpaque_(False)
         self.panel.setBackgroundColor_(NSColor.clearColor())
-        self.panel.setHasShadow_(True)
+        self.panel.setHasShadow_(False)
         self.panel.setLevel_(NSStatusWindowLevel)
         self.panel.setIgnoresMouseEvents_(True)
         self.panel.setHidesOnDeactivate_(False)
@@ -149,7 +152,7 @@ class Overlay:
             if self._visible:
                 self.panel.orderOut_(None)
                 self._visible = False
-                self._levels.extend([0.0] * BARS)
+                self._levels.extend([0.0] * LEVEL_SAMPLES)
             return
         clickable = mode == RECORD and locked
         width = LOCKED_WIDTH if clickable else WORK_WIDTH if mode == WORK else HOLD_WIDTH
@@ -161,7 +164,9 @@ class Overlay:
         if clickable != self._clickable:
             self.panel.setIgnoresMouseEvents_(not clickable)
             self._clickable = clickable
-        amplitude = min(1.0, math.sqrt(level) * 3.2)
-        self._levels.append(amplitude * 0.72 + self._levels[-1] * 0.28)
+        amplitude = min(1.0, math.sqrt(max(0.0, level - 0.004)) * 4.5)
+        previous = self._levels[-1]
+        response = 0.80 if amplitude > previous else 0.52
+        self._levels.append(previous + (amplitude - previous) * response)
         self.view.mode, self.view.locked, self.view.levels = mode, locked, list(self._levels)
         self.view.setNeedsDisplay_(True)

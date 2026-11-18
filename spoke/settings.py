@@ -9,14 +9,15 @@ import subprocess
 from pathlib import Path
 
 import objc
-from AppKit import (NSApp, NSBackingStoreBuffered, NSMakeRect, NSObject, NSTitlebarSeparatorStyleNone, NSView, NSWindow,
-                    NSWindowStyleMaskClosable, NSWindowStyleMaskTitled)
+from AppKit import (NSApp, NSBackingStoreBuffered, NSImage, NSMakeRect, NSObject, NSToolbar, NSToolbarDisplayModeIconAndLabel,
+                    NSToolbarItem, NSView, NSWindow, NSWindowStyleMaskClosable, NSWindowStyleMaskTitled,
+                    NSWindowToolbarStylePreference)
 
 from spoke import __version__, autostart, config as cfg, permissions
 
 LIBRARY = "libSpokeUI.dylib"
 LOG_PATH = os.path.expanduser("~/Library/Logs/Spoke.log")
-PANES = ("general", "overlay", "system")
+PANES = {"general": ("Основные", "gearshape"), "overlay": ("Плашка и звук", "waveform"), "system": ("Система", "lock.shield")}
 
 
 def library_path() -> Path:
@@ -31,6 +32,27 @@ def library_path() -> Path:
 
 class _Controller(NSObject):
     owner = None
+
+    def selectPane_(self, sender):
+        self.owner.select(str(sender.itemIdentifier()))
+
+    def toolbarAllowedItemIdentifiers_(self, toolbar):
+        return list(PANES)
+
+    def toolbarDefaultItemIdentifiers_(self, toolbar):
+        return list(PANES)
+
+    def toolbarSelectableItemIdentifiers_(self, toolbar):
+        return list(PANES)
+
+    def toolbar_itemForItemIdentifier_willBeInsertedIntoToolbar_(self, toolbar, identifier, flag):
+        title, icon = PANES[identifier]
+        item = NSToolbarItem.alloc().initWithItemIdentifier_(identifier)
+        item.setLabel_(title)
+        item.setImage_(NSImage.imageWithSystemSymbolName_accessibilityDescription_(icon, title))
+        item.setTarget_(self)
+        item.setAction_("selectPane:")
+        return item
 
     def settingChanged_value_(self, key, value):
         self.owner.changed(str(key), str(value))
@@ -54,9 +76,13 @@ class SettingsWindow:
             NSMakeRect(0, 0, 560, 300), NSWindowStyleMaskTitled | NSWindowStyleMaskClosable, NSBackingStoreBuffered, False)
         self.window.setReleasedWhenClosed_(False)
         self.window.setDelegate_(self.controller)
-        self.window.setTitle_("Настройки Spoke")
+        self.toolbar = NSToolbar.alloc().initWithIdentifier_("spoke.preferences")
+        self.toolbar.setDelegate_(self.controller)
+        self.toolbar.setAllowsUserCustomization_(False)
+        self.toolbar.setDisplayMode_(NSToolbarDisplayModeIconAndLabel)
         self.window.setTitlebarAppearsTransparent_(True)
-        self.window.setTitlebarSeparatorStyle_(NSTitlebarSeparatorStyleNone)
+        self.window.setToolbar_(self.toolbar)
+        self.window.setToolbarStyle_(NSWindowToolbarStylePreference)
         self.select("general", animate=False)
         self.window.center()
 
@@ -68,6 +94,8 @@ class SettingsWindow:
 
     def select(self, identifier: str, animate: bool = True) -> None:
         self.bridge.stopCapture()
+        self.toolbar.setSelectedItemIdentifier_(identifier)
+        self.window.setTitle_(PANES[identifier][0])
         if identifier not in self.panes:
             self.panes[identifier] = self.bridge.pane_(identifier)
         pane = self.panes[identifier]
@@ -118,9 +146,7 @@ class SettingsWindow:
     def action(self, name: str) -> None:
         panes = {"open_accessibility": permissions.ACCESSIBILITY_PANE, "open_input": permissions.INPUT_MONITORING_PANE,
                  "open_microphone": "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"}
-        if name in PANES:
-            self.select(name)
-        elif name in ("capture_start", "capture_stop"):
+        if name in ("capture_start", "capture_stop"):
             self.engine.capturing_shortcut = name == "capture_start"
         elif name in panes:
             subprocess.run(["open", panes[name]], check=False)

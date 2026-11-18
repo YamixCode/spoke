@@ -131,61 +131,8 @@ final class SettingsModel: ObservableObject {
     }
 }
 
-private enum Pane: String, CaseIterable {
+private enum Pane: String {
     case general, overlay, system
-
-    var title: String {
-        switch self {
-        case .general: return "Основные"
-        case .overlay: return "Плашка и звук"
-        case .system: return "Система"
-        }
-    }
-
-    var icon: String {
-        switch self {
-        case .general: return "gearshape"
-        case .overlay: return "waveform"
-        case .system: return "lock.shield"
-        }
-    }
-}
-
-private struct PaneNavigation: View {
-    let selected: Pane
-    let choose: (Pane) -> Void
-
-    private var buttons: some View {
-        HStack(spacing: 6) {
-            ForEach(Pane.allCases, id: \.self) { pane in
-                Button { choose(pane) } label: {
-                    VStack(spacing: 4) {
-                        Image(systemName: pane.icon).font(.system(size: 17, weight: .medium)).accessibilityHidden(true)
-                        Text(pane.title).font(.callout)
-                    }
-                    .foregroundStyle(pane == selected ? Color.accentColor : Color.secondary)
-                    .frame(width: 108, height: 45)
-                    .background(pane == selected ? Color.accentColor.opacity(0.13) : .clear, in: Capsule())
-                    .contentShape(Capsule())
-                }
-                .buttonStyle(.plain)
-                .accessibilityAddTraits(pane == selected ? .isSelected : [])
-            }
-        }
-        .padding(4)
-    }
-
-    var body: some View {
-        #if compiler(>=6.2)
-        if #available(macOS 26, *) {
-            buttons.glassEffect(.regular, in: .capsule)
-        } else {
-            buttons.background(.regularMaterial, in: Capsule())
-        }
-        #else
-        buttons.background(.regularMaterial, in: Capsule())
-        #endif
-    }
 }
 
 private struct SettingsPane: View {
@@ -193,20 +140,15 @@ private struct SettingsPane: View {
     let pane: Pane
 
     var body: some View {
-        VStack(spacing: 24) {
-            PaneNavigation(selected: pane) { model.act($0.rawValue) }
-            VStack(alignment: .leading, spacing: 15) {
-                switch pane {
-                case .general: general
-                case .overlay: overlay
-                case .system: system
-                }
+        VStack(alignment: .leading, spacing: 14) {
+            switch pane {
+            case .general: general
+            case .overlay: overlay
+            case .system: system
             }
-            .frame(maxWidth: .infinity)
         }
-        .padding(.horizontal, 48)
-        .padding(.top, 10)
-        .padding(.bottom, 26)
+        .padding(.horizontal, 34)
+        .padding(.vertical, 24)
         .frame(width: 536)
     }
 
@@ -216,62 +158,69 @@ private struct SettingsPane: View {
                 Button(model.capturing ? "Отменить" : model.hotkeyTitle) {
                     if model.capturing { model.stopCapture() } else { model.startCapture() }
                 }
+                .buttonStyle(.bordered)
                 .accessibilityLabel(model.capturing ? "Отменить выбор клавиши" : "Клавиша диктовки: \(model.hotkeyTitle). Изменить")
             }
-            Text(model.capturing ? "Нажмите и отпустите клавишу или сочетание." : "Нажмите на клавишу в настройках, чтобы назначить другую.")
-                .font(.callout).foregroundStyle(.secondary)
+            detail(model.capturing ? "Нажмите и отпустите клавишу или сочетание." : "Нажмите, чтобы назначить клавишу или сочетание.")
             Divider()
-            Toggle("Запускать при входе в систему", isOn: $model.autostart).toggleStyle(.checkbox)
+            option("Запускать при входе в систему", isOn: $model.autostart)
         }
     }
 
     private var overlay: some View {
         Group {
-            Toggle("Показывать плашку записи", isOn: $model.overlay).toggleStyle(.checkbox)
+            option("Показывать плашку записи", isOn: $model.overlay)
             row("Высота над Dock") {
                 Slider(value: $model.overlayMargin, in: 0...80, step: 1).frame(width: 145).accessibilityLabel("Высота над Dock")
                 Text("\(Int(model.overlayMargin)) пт").monospacedDigit().foregroundStyle(.secondary).frame(width: 42, alignment: .trailing)
             }
             .disabled(!model.overlay)
-            Text("Когда Dock скрыт, высота отсчитывается от края экрана.").font(.callout).foregroundStyle(.secondary)
+            detail("Когда Dock скрыт, высота отсчитывается от края экрана.")
             Divider()
-            Toggle("Звук в начале и конце записи", isOn: $model.sounds).toggleStyle(.checkbox)
+            option("Звук в начале и конце записи", isOn: $model.sounds)
         }
     }
 
     private var system: some View {
         Group {
-            Text("Разрешения").font(.headline)
+            Text("Разрешения").font(.headline).padding(.leading, 196)
             permission("Универсальный доступ", model.accessibility, "open_accessibility")
             permission("Мониторинг ввода", model.inputMonitoring, "open_input")
             permission("Микрофон", model.microphone, "open_microphone")
             Divider()
-            Toggle("Ускорять диктовку после простоя", isOn: $model.keepWarm).toggleStyle(.checkbox)
-            Text("Spoke периодически прогревает модель, чтобы первая фраза после паузы обработалась быстрее.")
-                .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            option("Ускорять диктовку после простоя", isOn: $model.keepWarm)
+            detail("Spoke периодически прогревает модель, чтобы первая фраза после паузы обработалась быстрее.")
             Divider()
             row("Версия") { Text(model.version).foregroundStyle(.secondary) }
             row("Обновления") {
                 Text(model.updateStatus).font(.callout).foregroundStyle(.secondary).lineLimit(1)
-                Button("Проверить…") { model.act("update") }
+                Button("Проверить…") { model.act("update") }.buttonStyle(.bordered)
             }
-            Toggle("Проверять обновления при запуске", isOn: $model.checkUpdates).toggleStyle(.checkbox)
-            row("Журнал") { Button("Показать в Finder") { model.act("show_log") } }
+            option("Проверять обновления при запуске", isOn: $model.checkUpdates)
+            row("Журнал") { Button("Показать в Finder") { model.act("show_log") }.buttonStyle(.bordered) }
         }
     }
 
     private func row<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
-        HStack {
-            Text(title)
-            Spacer()
-            content()
+        HStack(spacing: 10) {
+            Text(title).frame(width: 186, alignment: .trailing)
+            HStack(content: content).frame(maxWidth: .infinity, alignment: .leading)
         }
+    }
+
+    private func option(_ title: String, isOn: Binding<Bool>) -> some View {
+        Toggle(title, isOn: isOn).toggleStyle(.checkbox).padding(.leading, 196)
+    }
+
+    private func detail(_ title: String) -> some View {
+        Text(title).font(.callout).foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true).padding(.leading, 196)
     }
 
     private func permission(_ title: String, _ status: String, _ action: String) -> some View {
         row(title) {
             Text(status).font(.callout).foregroundStyle(.secondary)
-            Button("Открыть…") { model.act(action) }.accessibilityLabel("Открыть настройки: \(title)")
+            Button("Открыть…") { model.act(action) }.buttonStyle(.bordered).accessibilityLabel("Открыть настройки: \(title)")
         }
     }
 }
