@@ -69,7 +69,7 @@ class SpokeApp(rumps.App):
         if release is None:
             self._available = None
             return self._say(f"Установлена последняя версия ({__version__})")
-        notes = release.notes.strip()[:600] or "Установить обновление?"
+        notes = updater.release_notes(release.notes)[:600] or "Установить обновление?"
         if not rumps.alert(title=f"Доступно обновление {release.version}", message=notes, ok="Обновить", cancel="Позже"):
             return "Обновление отложено"
         try:

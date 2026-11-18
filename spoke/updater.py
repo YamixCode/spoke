@@ -99,6 +99,23 @@ def check(token: str = "") -> Release | None:
     return release if parse_version(release.version) > parse_version(__version__) else None
 
 
+def release_notes(markdown: str) -> str:
+    items, plain = [], []
+    for raw in markdown.splitlines():
+        line = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", raw).strip()
+        if not line or re.match(r"\W*full changelog", line, re.IGNORECASE):
+            continue
+        bullet = re.match(r"[*-]\s+(.*?)(?:\s+by\s+@\S+.*)?$", line)
+        if bullet:
+            if not re.match(r"(версия|bump|release)\b", bullet.group(1), re.IGNORECASE):
+                items.append("• " + re.sub(r"\*\*|__|`", "", bullet.group(1)).strip())
+            continue
+        if not re.match(r"#+\s*what'?s changed", line, re.IGNORECASE):
+            plain.append(re.sub(r"https?://\S+", "", re.sub(r"^#+\s*|\*\*|__|`", "", line)).strip())
+    head = [line for line in plain if line]
+    return "\n".join(head + ([""] if head and items else []) + items).strip()
+
+
 def installed_shell_api() -> int | None:
     resources = os.environ.get("RESOURCEPATH")
     if not resources:
