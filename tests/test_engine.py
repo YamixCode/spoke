@@ -5,9 +5,9 @@ import pytest
 
 import numpy as np
 
-from spoke import config as cfg, engine as engine_module
+from spoke import config as cfg
 from spoke.engine import IDLE, RECORDING, Engine
-from spoke.transcribe import SAMPLE_RATE, clean, is_silence
+from spoke.transcribe import SAMPLE_RATE, is_silence
 
 
 class FakeRecorder:
@@ -31,8 +31,8 @@ class FakeTranscriber:
     def warm_up(self):
         pass
 
-    def transcribe(self, audio, language, prompt):
-        self.calls.append((len(audio), language, prompt))
+    def transcribe(self, audio, vocabulary):
+        self.calls.append((len(audio), vocabulary))
         return self.text
 
 
@@ -47,10 +47,10 @@ def make(audio, text="Привет, мир.", config=None):
     return engine, pasted
 
 
-def test_speech_is_transcribed_and_pasted_with_language_and_vocabulary():
-    engine, pasted = make(speech(), config=cfg.Config(sounds=False, vocabulary=["Пётр"], language="ru"))
+def test_speech_is_transcribed_and_pasted_with_vocabulary():
+    engine, pasted = make(speech(), config=cfg.Config(sounds=False, vocabulary=["Пётр"]))
     assert engine.process(speech()) == "Привет, мир." and pasted == [("Привет, мир.", True, False)]
-    assert engine.transcriber.calls == [(int(1.5 * SAMPLE_RATE), "ru", "Термины и имена: Пётр.")]
+    assert engine.transcriber.calls == [(int(1.5 * SAMPLE_RATE), ["Пётр"])]
     assert engine.state == IDLE and engine.last_text == "Привет, мир."
 
 
@@ -82,78 +82,41 @@ def test_start_stop_cancel_flow_through_the_recorder():
 
 
 def test_filters_and_config(tmp_path):
-    assert clean("Привет. Субтитры сделал DimaTorzok") == "Привет."
     assert is_silence(np.zeros(100, dtype=np.float32), 0.004) and not is_silence(speech(), 0.004)
     path = tmp_path / "c.json"
-    path.write_text(json.dumps({"hotkey": "f99", "language": "xx", "hold_ms": 5, "vocabulary": ["А"], "sounds": False}), encoding="utf-8")
+    path.write_text(json.dumps({"hotkey": "f99", "recognition_backend": "whisper", "model": "old-weights",
+                                "keep_warm_seconds": 45, "hold_ms": 5, "vocabulary": ["А"], "sounds": False}), encoding="utf-8")
     loaded = cfg.load(path)
-    assert (loaded.hotkey, loaded.language, loaded.hold_ms, loaded.vocabulary, loaded.sounds) == ("ctrl", "ru", 100, ["А"], False)
-    loaded.language = "auto"
+    assert (loaded.hotkey, loaded.hold_ms, loaded.vocabulary, loaded.sounds) == ("ctrl", 100, ["А"], False)
     cfg.save(loaded, path)
-    assert cfg.load(path).whisper_language() is None
+    assert not {"model", "recognition_backend", "keep_warm_seconds"}.intersection(json.loads(path.read_text()))
+
 
 
 def test_app_defaults_apply_to_saved_configuration(tmp_path):
     path = tmp_path / "config.json"
-    path.write_text(json.dumps({"hotkey": "key:0:1048576:⌘A", "language": "ru", "history_size": 3,
+    path.write_text(json.dumps({"hotkey": "key:0:1048576:⌘A", "history_size": 3,
                                 "auto_space": False, "streaming": False, "autostart": False}), encoding="utf-8")
     loaded = cfg.load(path)
     loaded.apply_app_defaults()
     assert loaded.hotkey_title() == "⌘A" and not loaded.autostart
-    assert (loaded.whisper_language(), loaded.history_size, loaded.auto_space, loaded.streaming) == (None, 15, True, True)
+    assert (loaded.history_size, loaded.auto_space, loaded.streaming) == (15, True, True)
     assert cfg.Config().autostart
 
 
-def test_switching_backends_preserves_the_recording_flow_and_saves_choice(monkeypatch, tmp_path):
-    audio = speech()
-    engine, pasted = make(audio)
-    original = engine.transcriber
-    released = []
-    original.close = lambda: released.append(True)
-    apple = FakeTranscriber("Диктовка macOS.")
-    monkeypatch.setattr(engine_module, "make_transcriber", lambda backend, model: apple)
-    path = tmp_path / "config.json"
-    save = lambda config: cfg.save(config, path)
+def test_engine_uses_apple_with_cleanup_even_if_legacy_config_selected_whisper(tmp_path, monkeypatch):
+    from spoke import engine as module
 
-    deadline = time.monotonic() + 2
-    while engine.state != IDLE and time.monotonic() < deadline:
-        time.sleep(0.005)
-    engine._start()
-    engine.switch_backend(cfg.MACOS, save)
-    assert engine.transcriber is original and engine.pending_backend is None
-    engine._cancel()
-    engine.switch_backend(cfg.MACOS, save)
-    deadline = time.monotonic() + 2
-    while engine.state != IDLE and time.monotonic() < deadline:
-        time.sleep(0.005)
-    assert engine.transcriber is apple and released == [True]
-    assert cfg.load(path).recognition_backend == cfg.MACOS
-    assert engine.process(audio) == "Диктовка macOS."
-    assert pasted[0][0] == "Диктовка macOS."
-
-
-def test_failing_backend_switch_keeps_the_working_model(monkeypatch):
-    engine, _ = make(speech())
-    original = engine.transcriber
-    apple = FakeTranscriber()
-    saves = []
-
-    def failed():
-        raise RuntimeError("Языковая модель недоступна")
-
-    apple.warm_up = failed
-    monkeypatch.setattr(engine_module, "make_transcriber", lambda backend, model: apple)
-    deadline = time.monotonic() + 2
-    while engine.state != IDLE and time.monotonic() < deadline:
-        time.sleep(0.005)
-    engine.switch_backend(cfg.MACOS, lambda config: saves.append(config))
-    deadline = time.monotonic() + 2
-    while engine.state != IDLE and time.monotonic() < deadline:
-        time.sleep(0.005)
-    assert engine.transcriber is original
-    assert saves == []
-    assert engine.recognition_backend == engine.config.recognition_backend == cfg.WHISPER
-    assert engine.pending_backend is None and engine.last_error == "Языковая модель недоступна"
+    config_file = tmp_path / "config.json"
+    config_file.write_text('{"recognition_backend": "whisper"}')
+    transcriber = FakeTranscriber("Диктовка macOS.")
+    cleanups = []
+    monkeypatch.setattr(module, "AppleTranscriber", lambda cleanup: cleanups.append(cleanup) or transcriber)
+    pasted = []
+    engine = Engine(cfg.load(config_file), recorder=FakeRecorder(speech()), paste=lambda t, r, s: pasted.append(t))
+    assert engine.transcriber is transcriber and cleanups == [engine.cleanup]
+    assert engine.process(speech()) == "Диктовка macOS."
+    assert pasted == ["Диктовка macOS."]
 
 
 def test_consecutive_pastes_are_separated_by_space_but_first_is_not():
@@ -189,19 +152,6 @@ def test_locked_recording_is_finished_or_cancelled_from_overlay_buttons():
     assert engine.state == RECORDING
 
 
-def test_key_press_prewarms_idle_model_but_not_while_recording():
-    engine, _ = make(speech())
-    calls = []
-    engine.transcriber.prewarm = lambda *a, **k: calls.append(1)
-    engine.state = IDLE
-    engine._prewarm()
-    engine.state = RECORDING
-    engine._prewarm()
-    import time as t
-    t.sleep(0.2)
-    assert calls == [1]
-
-
 def test_history_keeps_recent_dictations_and_pastes_chosen_one(monkeypatch):
     engine, pasted = make(speech(), text="Раз.", config=cfg.Config(sounds=False, history_size=2))
     engine.process(speech())
@@ -221,24 +171,24 @@ def test_default_config_path_loads_settings_and_migrates_legacy_file(tmp_path, m
     new, legacy = tmp_path / "spoke" / "config.json", tmp_path / "localflow" / "config.json"
     monkeypatch.setattr(cfg, "CONFIG_PATH", new)
     monkeypatch.setattr(cfg, "LEGACY_CONFIG_PATH", legacy)
-    assert cfg.load().language == "auto"
+    assert cfg.load().history_size == 15
     legacy.parent.mkdir()
-    legacy.write_text(json.dumps({"language": "en", "history_size": 3}))
+    legacy.write_text(json.dumps({"hotkey": "right_option", "history_size": 3}))
     loaded = cfg.load()
-    assert loaded.language == "en" and loaded.history_size == 3
+    assert loaded.hotkey == "right_option" and loaded.history_size == 3
     cfg.save(loaded)
     legacy.unlink()
-    assert cfg.load().language == "en" and new.exists()
+    assert cfg.load().hotkey == "right_option" and new.exists()
 
 
 
 def test_set_option_parses_values_from_the_settings_window():
     config = cfg.Config()
     for key, text in (("hold_ms", "310"), ("history_size", "7.0"), ("overlay", "false"), ("auto_space", "true"), ("overlay_bottom_margin", "22"),
-                      ("hotkey", "right_option"), ("language", "en"), ("vocabulary", " Пётр \n\nKubernetes\n")):
+                      ("hotkey", "right_option"), ("vocabulary", " Пётр \n\nKubernetes\n")):
         cfg.set_option(config, key, text)
     assert (config.hold_ms, config.history_size, config.overlay, config.auto_space, config.overlay_bottom_margin) == (310, 7, False, True, 22.0)
-    assert (config.hotkey, config.language, config.vocabulary) == ("right_option", "en", ["Пётр", "Kubernetes"])
-    for key, text in (("hotkey", "nonsense"), ("language", "xx"), ("unknown", "1")):
+    assert (config.hotkey, config.vocabulary) == ("right_option", ["Пётр", "Kubernetes"])
+    for key, text in (("hotkey", "nonsense"), ("unknown", "1")):
         with pytest.raises(KeyError):
             cfg.set_option(config, key, text)

@@ -52,8 +52,8 @@ class ScriptedTranscriber:
     def warm_up(self):
         pass
 
-    def transcribe(self, audio, language, prompt):
-        self.calls.append((len(audio) / SAMPLE_RATE, prompt))
+    def transcribe(self, audio, vocabulary):
+        self.calls.append((len(audio) / SAMPLE_RATE, vocabulary))
         return self.texts.pop(0)
 
 
@@ -61,13 +61,13 @@ def test_finished_chunks_are_transcribed_while_speaking_and_finish_only_does_the
     full = np.concatenate([talk(5), pause(0.6), talk(5), pause(0.6), talk(2)])
     recorder = GrowingRecorder(full)
     transcriber = ScriptedTranscriber(["Первая часть.", "Вторая часть.", "Хвост."])
-    session = StreamSession(recorder, transcriber, "ru", "Термины и имена: Пётр.", poll=0.02).start()
+    session = StreamSession(recorder, transcriber, ("Пётр",), poll=0.02).start()
     for _ in range(14):
         recorder.advance(1)
         time.sleep(0.15)
     assert len(transcriber.calls) == 2
-    assert transcriber.calls[0][1] == "Термины и имена: Пётр."
-    assert transcriber.calls[1][1] == "Термины и имена: Пётр. Первая часть"
+    assert transcriber.calls[0][1] == ("Пётр",)
+    assert transcriber.calls[1][1] == ("Пётр",)
     started = time.monotonic()
     text = session.finish(full)
     assert text == "Первая часть. Вторая часть. Хвост." and len(transcriber.calls) == 3
@@ -97,7 +97,7 @@ def test_short_dictation_without_pauses_is_a_single_transcription_and_engine_wir
 
 
 def test_cancel_stops_the_background_thread():
-    session = StreamSession(GrowingRecorder(talk(1)), ScriptedTranscriber([]), "ru", None, poll=0.02).start()
+    session = StreamSession(GrowingRecorder(talk(1)), ScriptedTranscriber([]), poll=0.02).start()
     session.cancel()
     session._thread.join(timeout=1)
     assert not session._thread.is_alive()

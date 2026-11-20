@@ -14,17 +14,7 @@ HISTORY_FILE = DATA_DIR / "history.jsonl"
 RECOVERY_FILE = DATA_DIR / "recovery" / "recording.pcm"
 CONFIG_PATH = Path(os.environ.get("SPOKE_CONFIG") or Path.home() / ".config" / "spoke" / "config.json")
 LEGACY_CONFIG_PATH = Path.home() / ".config" / "localflow" / "config.json"
-DEFAULT_MODEL = "mlx-community/whisper-large-v3-turbo"
-WHISPER, MACOS = "whisper", "macos"
-RECOGNITION_BACKENDS = (WHISPER, MACOS)
 _SAVE_LOCK = threading.Lock()
-
-
-def bundled_model() -> str | None:
-    resources = os.environ.get("RESOURCEPATH")
-    path = Path(resources) / "model" if resources else None
-    return str(path) if path and (path / "weights.safetensors").exists() else None
-LANGUAGES = {"ru": "Русский", "en": "English", "auto": "Автоопределение"}
 HOTKEY_NAMES = {"ctrl": "Ctrl", "option": "Option", "right_option": "Правый Option", "cmd": "Cmd", "right_cmd": "Правый Cmd",
                 "shift": "Shift", "right_shift": "Правый Shift"}
 
@@ -33,9 +23,6 @@ HOTKEY_NAMES = {"ctrl": "Ctrl", "option": "Option", "right_option": "Правы�
 class Config:
     hotkey: str = "ctrl"
     hold_ms: int = 250
-    language: str = "auto"
-    model: str = DEFAULT_MODEL
-    recognition_backend: str = WHISPER
     sounds: bool = False
     restore_clipboard: bool = True
     trailing_space: bool = False
@@ -46,7 +33,6 @@ class Config:
     chunk_min_seconds: float = 3.0
     chunk_max_seconds: float = 14.0
     chunk_pause_seconds: float = 0.6
-    keep_warm_seconds: int = 45
     check_updates_on_start: bool = True
     save_history: bool = True
     history_size: int = 15
@@ -60,15 +46,11 @@ class Config:
     vocabulary: list[str] = field(default_factory=list)
 
     def apply_app_defaults(self) -> None:
-        self.language = "auto"
         self.hold_ms = 250
         self.double_tap_ms = 400
         self.history_size = 15
         self.auto_space = True
         self.streaming = True
-
-    def whisper_language(self) -> str | None:
-        return None if self.language == "auto" else self.language
 
     def token(self) -> str:
         return os.environ.get("SPOKE_GITHUB_TOKEN", "")
@@ -78,13 +60,8 @@ class Config:
             return Shortcut.parse(self.hotkey).title
         return HOTKEY_NAMES.get(self.hotkey, self.hotkey.upper())
 
-    def prompt(self) -> str | None:
-        words = ", ".join(self.vocabulary)
-        return (f"Термины и имена: {words}." if words else None)
-
-
 BOOLEANS = ("auto_space", "autostart", "overlay", "sounds", "streaming", "check_updates_on_start")
-INTEGERS = ("hold_ms", "double_tap_ms", "history_size", "keep_warm_seconds")
+INTEGERS = ("hold_ms", "double_tap_ms", "history_size")
 
 
 def set_option(config: "Config", key: str, text: str) -> None:
@@ -98,8 +75,6 @@ def set_option(config: "Config", key: str, text: str) -> None:
         config.overlay_bottom_margin = float(text)
     elif key == "hotkey" and valid_shortcut(text):
         config.hotkey = text
-    elif key == "language" and text in LANGUAGES:
-        config.language = text
     else:
         raise KeyError(key)
 
@@ -120,13 +95,7 @@ def load(path: Path | None = None) -> Config:
             setattr(config, key, value)
     if not valid_shortcut(config.hotkey):
         config.hotkey = "ctrl"
-    if config.recognition_backend not in RECOGNITION_BACKENDS:
-        config.recognition_backend = WHISPER
-    if config.language not in ("ru", "en", "auto"):
-        config.language = "ru"
     config.hold_ms = max(100, min(int(config.hold_ms), 2000))
-    if config.model == DEFAULT_MODEL and bundled_model():
-        config.model = bundled_model()
     return config
 
 
@@ -134,8 +103,5 @@ def save(config: Config, path: Path | None = None) -> None:
     path = Path(path or CONFIG_PATH)
     with _SAVE_LOCK:
         path.parent.mkdir(parents=True, exist_ok=True)
-        data = asdict(config)
-        if data["model"] == bundled_model():
-            data["model"] = DEFAULT_MODEL
-        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        path.write_text(json.dumps(asdict(config), ensure_ascii=False, indent=2), encoding="utf-8")
         path.chmod(0o600)

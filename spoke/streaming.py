@@ -1,7 +1,4 @@
-"""Распознавание пока вы говорите: готовые куски речи уходят в Whisper в фоне, при отпускании клавиши остаётся только хвост.
-
-Резать нужно по паузам в речи (иначе слово разорвётся). `find_cut` ищет паузу после минимальной длины куска; если пауз нет, режет в самом тихом месте
-перед максимальной длиной. Предыдущий текст передаётся Whisper подсказкой, чтобы куски склеивались в связный текст."""
+"""Распознаёт готовые фрагменты в фоне и обрабатывает хвост по окончании записи."""
 from __future__ import annotations
 
 import threading
@@ -28,7 +25,7 @@ SHORT_PAUSE = 0.3
 def find_cut(audio: np.ndarray, min_chunk: float, max_chunk: float, min_pause: float, silence_rms: float) -> int | None:
     """Индекс отсчёта, где можно закончить кусок, или None (ждём дальше). Режет по первой длинной паузе (`min_pause`, обычно конец предложения)
     после `min_chunk`; если кусок уже длиннее 8 секунд, годится и короткая пауза; если пауз нет до `max_chunk`, то в самом тихом месте.
-    Так предложение реже разрывается посередине: Whisper в конце каждого куска ставит точку."""
+    Так предложение реже разрывается посередине."""
     rms = _frame_rms(audio)
     if len(rms) * FRAME < min_chunk * SAMPLE_RATE + GUARD:
         return None
@@ -60,9 +57,9 @@ def find_cut(audio: np.ndarray, min_chunk: float, max_chunk: float, min_pause: f
 class StreamSession:
     """Одна диктовка: фоновый поток режет и распознаёт готовые куски, `finish` распознаёт хвост и склеивает текст."""
 
-    def __init__(self, recorder, transcriber, language, vocab_prompt: str | None, min_chunk=3.0, max_chunk=14.0, min_pause=0.45,
+    def __init__(self, recorder, transcriber, vocabulary: tuple[str, ...] = (), min_chunk=3.0, max_chunk=14.0, min_pause=0.45,
                  silence_rms=0.004, poll=0.25):
-        self.recorder, self.transcriber, self.language, self.vocab = recorder, transcriber, language, vocab_prompt
+        self.recorder, self.transcriber, self.vocabulary = recorder, transcriber, vocabulary
         self.min_chunk, self.max_chunk, self.min_pause, self.silence_rms, self.poll = min_chunk, max_chunk, min_pause, silence_rms, poll
         self.parts: list[str] = []
         self.cut = 0
@@ -74,13 +71,8 @@ class StreamSession:
         self._thread.start()
         return self
 
-    def _prompt(self) -> str | None:
-        tail = " ".join(self.parts)[-200:].rstrip(" .")
-        text = " ".join(p for p in (self.vocab, tail) if p)
-        return text or None
-
     def _transcribe(self, audio: np.ndarray) -> str:
-        return self.transcriber.transcribe(audio, self.language, self._prompt())
+        return self.transcriber.transcribe(audio, self.vocabulary)
 
     def _loop(self) -> None:
         while not self._stop.wait(self.poll):

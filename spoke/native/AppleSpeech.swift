@@ -52,10 +52,15 @@ private func prepareAppleSpeech() async throws -> String {
 }
 
 @available(macOS 26, *)
-private func recognizeAppleSpeech(path: String, locale: String) async throws -> String {
+private func recognizeAppleSpeech(path: String, locale: String, vocabulary: [String]) async throws -> String {
     let audio = try AVAudioFile(forReading: URL(fileURLWithPath: path))
     let transcriber = DictationTranscriber(locale: Locale(identifier: locale), preset: .longDictation)
     let analyzer = SpeechAnalyzer(modules: [transcriber])
+    if !vocabulary.isEmpty {
+        let context = AnalysisContext()
+        context.contextualStrings = [.general: vocabulary]
+        try await analyzer.setContext(context)
+    }
     async let transcript = collectAppleSpeech(transcriber)
     do {
         if let end = try await analyzer.analyzeSequence(from: audio) {
@@ -89,12 +94,13 @@ public func spokeApplePrepare() -> UnsafeMutablePointer<CChar>? {
 }
 
 @_cdecl("spoke_apple_transcribe")
-public func spokeAppleTranscribe(_ path: UnsafePointer<CChar>, _ locale: UnsafePointer<CChar>) -> UnsafeMutablePointer<CChar>? {
+public func spokeAppleTranscribe(_ path: UnsafePointer<CChar>, _ locale: UnsafePointer<CChar>, _ vocabulary: UnsafePointer<CChar>) -> UnsafeMutablePointer<CChar>? {
     let filename = String(cString: path)
     let language = String(cString: locale)
+    let terms = (try? JSONDecoder().decode([String].self, from: Data(String(cString: vocabulary).utf8))) ?? []
     return appleSpeechResult {
         guard #available(macOS 26, *) else { throw AppleSpeechError.unsupportedSystem }
-        return try await recognizeAppleSpeech(path: filename, locale: language)
+        return try await recognizeAppleSpeech(path: filename, locale: language, vocabulary: terms)
     }
 }
 
