@@ -4,8 +4,8 @@ import ctypes
 import json
 import os
 import platform
+import struct
 import tempfile
-import wave
 
 import numpy as np
 
@@ -30,10 +30,17 @@ class AppleTranscriber:
     def transcribe(self, audio: np.ndarray, language: str | None, prompt: str | None) -> str:
         if not self._locale:
             self.warm_up()
+        samples = (np.clip(audio, -1.0, 1.0) * 32767).astype("<i2")
+        data_size = samples.nbytes
+        header = struct.pack(
+            "<4sI4s4sIHHIIHH4sI",
+            b"RIFF", 36 + data_size, b"WAVE",
+            b"fmt ", 16, 1, 1, SAMPLE_RATE, SAMPLE_RATE * 2, 2, 16,
+            b"data", data_size,
+        )
         with tempfile.NamedTemporaryFile(suffix=".wav") as file:
-            with wave.open(file, "wb") as output:
-                output.setparams((1, 2, SAMPLE_RATE, 0, "NONE", "not compressed"))
-                output.writeframes((np.clip(audio, -1.0, 1.0) * 32767).astype("<i2").tobytes())
+            file.write(header)
+            file.write(samples.tobytes())
             file.flush()
             return self._call("spoke_apple_transcribe", os.fsencode(file.name), self._locale.encode())
 
