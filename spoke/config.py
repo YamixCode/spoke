@@ -15,7 +15,7 @@ RECOVERY_FILE = DATA_DIR / "recovery" / "recording.pcm"
 CONFIG_PATH = Path(os.environ.get("SPOKE_CONFIG") or Path.home() / ".config" / "spoke" / "config.json")
 LEGACY_CONFIG_PATH = Path.home() / ".config" / "localflow" / "config.json"
 _SAVE_LOCK = threading.Lock()
-HOTKEY_NAMES = {"ctrl": "Ctrl", "option": "Option", "right_option": "Правый Option", "cmd": "Cmd", "right_cmd": "Правый Cmd",
+HOTKEY_NAMES = {"ctrl": "Левый Ctrl", "right_ctrl": "Правый Ctrl", "option": "Option", "right_option": "Правый Option", "cmd": "Cmd", "right_cmd": "Правый Cmd",
                 "shift": "Shift", "right_shift": "Правый Shift"}
 
 

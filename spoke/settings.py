@@ -4,7 +4,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sqlite3
 import subprocess
+import time
 
 import objc
 from AppKit import (NSApp, NSBackingStoreBuffered, NSImage, NSMakeRect, NSObject, NSToolbar, NSToolbarDisplayModeIconAndLabel,
@@ -15,9 +17,11 @@ from spoke import __version__, autostart, config as cfg, permissions
 from spoke.apple_speech import available as apple_speech_available
 from spoke.cloud import PROVIDERS, keychain_read, keychain_remove, keychain_save
 from spoke.native_bridge import load_library
+from spoke.usage import key_fingerprint, usage_store
 
 LOG_PATH = os.path.expanduser("~/Library/Logs/Spoke.log")
 PANES = {"general": ("Основные", "gearshape"), "recognition": ("Распознавание", "text.bubble"),
+         "usage": ("Расход API", "chart.bar"),
          "overlay": ("Плашка и звук", "waveform"), "system": ("Система", "lock.shield")}
 
 
@@ -58,6 +62,8 @@ class _Controller(NSObject):
 class SettingsWindow:
     def __init__(self, config: cfg.Config, engine, on_change=lambda key: None, on_update=lambda: ""):
         self.config, self.engine, self.on_change, self.on_update = config, engine, on_change, on_update
+        self._usage_fingerprints = {}
+        self._usage_refresh_at = 0.0
         load_library()
         self.controller = _Controller.alloc().init()
         self.controller.owner = self
@@ -96,10 +102,27 @@ class SettingsWindow:
             message = str(error)
         self.bridge.update_(json.dumps({**values, "cloud_message": message}))
 
+    def refresh_usage(self, *, reload_keys: bool = False) -> None:
+        if not reload_keys and (self.toolbar.selectedItemIdentifier() != "usage" or time.monotonic() < self._usage_refresh_at):
+            return
+        self._usage_refresh_at = time.monotonic() + 2
+        message = ""
+        try:
+            if reload_keys:
+                self._usage_fingerprints = {provider: key_fingerprint(keychain_read(provider)) for provider in PROVIDERS}
+            both = {period: usage_store.totals(self._usage_fingerprints, this_month=period == "month")
+                    for period in ("month", "all")}
+        except (OSError, sqlite3.Error, RuntimeError):
+            both = {}
+            message = "Не удалось прочитать расход API."
+        self.bridge.update_(json.dumps({"api_usage": both, "usage_message": message}))
+
     def select(self, identifier: str, animate: bool = True) -> None:
         self.bridge.stopCapture()
         if identifier == "recognition":
             self._refresh_keys()
+        elif identifier == "usage":
+            self.refresh_usage(reload_keys=True)
         self.toolbar.setSelectedItemIdentifier_(identifier)
         self.window.setTitle_(PANES[identifier][0])
         if identifier not in self.panes:
@@ -124,6 +147,8 @@ class SettingsWindow:
         self.refresh_permissions()
         if self.toolbar.selectedItemIdentifier() == "recognition":
             self._refresh_keys()
+        elif self.toolbar.selectedItemIdentifier() == "usage":
+            self.refresh_usage(reload_keys=True)
         NSApp.activateIgnoringOtherApps_(True)
         self.window.makeKeyAndOrderFront_(None)
 
