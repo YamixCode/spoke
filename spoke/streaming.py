@@ -92,13 +92,13 @@ class StreamSession:
                     continue
                 with self._lock:
                     chunk = pending[:point]
-                    self.cut += point
                     if np.sqrt(np.mean(np.square(chunk))) >= self.silence_rms:
                         text = self._transcribe(chunk)
                         if text:
                             self.parts.append(text)
+                    self.cut += point
             except Exception:
-                continue
+                return
 
     def finish(self, audio: np.ndarray) -> str:
         """Звук целиком после остановки записи: распознать всё, что ещё не распознано, и склеить."""

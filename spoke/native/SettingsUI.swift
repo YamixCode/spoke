@@ -20,9 +20,13 @@ private let modifierMask = NSEvent.ModifierFlags(shortcutModifiers.map(\.0))
 final class SettingsModel: ObservableObject {
     weak var delegate: NSObject?
     let version: String
+    let appleAvailable: Bool
 
     @Published var hotkeyTitle: String
     @Published var capturing = false
+    @Published var recognitionBackend: String { didSet { send("recognition_backend", recognitionBackend) } }
+    @Published var backendBusy: Bool
+    @Published var backendLoading: Bool
     @Published var autostart: Bool { didSet { send("autostart", autostart) } }
     @Published var overlay: Bool { didSet { send("overlay", overlay) } }
     @Published var overlayMargin: Double { didSet { if overlayMargin.rounded() != oldValue.rounded() { send("overlay_bottom_margin", Int(overlayMargin)) } } }
@@ -45,7 +49,11 @@ final class SettingsModel: ObservableObject {
     init(json: [String: Any], delegate: NSObject) {
         self.delegate = delegate
         version = json["version"] as? String ?? ""
+        appleAvailable = json["apple_available"] as? Bool ?? false
         hotkeyTitle = json["hotkey_title"] as? String ?? "Ctrl"
+        recognitionBackend = json["recognition_backend"] as? String ?? "whisper"
+        backendBusy = json["backend_busy"] as? Bool ?? false
+        backendLoading = json["backend_loading"] as? Bool ?? false
         autostart = json["autostart"] as? Bool ?? true
         overlay = json["overlay"] as? Bool ?? true
         overlayMargin = json["overlay_bottom_margin"] as? Double ?? 14
@@ -69,6 +77,9 @@ final class SettingsModel: ObservableObject {
         if let value = json["keep_warm_seconds"] as? Int, (value > 0) != keepWarm { keepWarm = value > 0 }
         if let value = json["check_updates_on_start"] as? Bool, value != checkUpdates { checkUpdates = value }
         if let value = json["hotkey_title"] as? String, value != hotkeyTitle { hotkeyTitle = value }
+        if let value = json["recognition_backend"] as? String, value != recognitionBackend { recognitionBackend = value }
+        if let value = json["backend_busy"] as? Bool, value != backendBusy { backendBusy = value }
+        if let value = json["backend_loading"] as? Bool, value != backendLoading { backendLoading = value }
         suppress = false
     }
 
@@ -154,6 +165,22 @@ private struct SettingsPane: View {
 
     private var general: some View {
         Group {
+            row("Распознавание речи") {
+                Picker("Распознавание речи", selection: $model.recognitionBackend) {
+                    Text("Локальная модель (Whisper)").tag("whisper")
+                    if model.appleAvailable {
+                        Text("Диктовка macOS").tag("macos")
+                    }
+                }
+                .labelsHidden()
+                .disabled(model.backendBusy || !model.appleAvailable)
+                if model.backendLoading {
+                    ProgressView().controlSize(.small).accessibilityLabel("Подготовка распознавателя")
+                }
+            }
+            if !model.appleAvailable {
+                detail("Диктовка macOS доступна с macOS 26.")
+            }
             row("Клавиша диктовки") {
                 Button(model.capturing ? "Отменить" : model.hotkeyTitle) {
                     if model.capturing { model.stopCapture() } else { model.startCapture() }
@@ -189,7 +216,8 @@ private struct SettingsPane: View {
             permission("Микрофон", model.microphone, "open_microphone")
             Divider()
             option("Ускорять диктовку после простоя", isOn: $model.keepWarm)
-            detail("Spoke периодически прогревает модель, чтобы первая фраза после паузы обработалась быстрее.")
+                .disabled(model.recognitionBackend == "macos")
+            detail("Spoke периодически прогревает Whisper, чтобы первая фраза после паузы обработалась быстрее.")
             Divider()
             row("Версия") { Text(model.version).foregroundStyle(.secondary) }
             row("Обновления") {

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -14,6 +15,9 @@ RECOVERY_FILE = DATA_DIR / "recovery" / "recording.pcm"
 CONFIG_PATH = Path(os.environ.get("SPOKE_CONFIG") or Path.home() / ".config" / "spoke" / "config.json")
 LEGACY_CONFIG_PATH = Path.home() / ".config" / "localflow" / "config.json"
 DEFAULT_MODEL = "mlx-community/whisper-large-v3-turbo"
+WHISPER, MACOS = "whisper", "macos"
+RECOGNITION_BACKENDS = (WHISPER, MACOS)
+_SAVE_LOCK = threading.Lock()
 
 
 def bundled_model() -> str | None:
@@ -31,6 +35,7 @@ class Config:
     hold_ms: int = 250
     language: str = "auto"
     model: str = DEFAULT_MODEL
+    recognition_backend: str = WHISPER
     sounds: bool = False
     restore_clipboard: bool = True
     trailing_space: bool = False
@@ -115,6 +120,8 @@ def load(path: Path | None = None) -> Config:
             setattr(config, key, value)
     if not valid_shortcut(config.hotkey):
         config.hotkey = "ctrl"
+    if config.recognition_backend not in RECOGNITION_BACKENDS:
+        config.recognition_backend = WHISPER
     if config.language not in ("ru", "en", "auto"):
         config.language = "ru"
     config.hold_ms = max(100, min(int(config.hold_ms), 2000))
@@ -125,9 +132,10 @@ def load(path: Path | None = None) -> Config:
 
 def save(config: Config, path: Path | None = None) -> None:
     path = Path(path or CONFIG_PATH)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    data = asdict(config)
-    if data["model"] == bundled_model():
-        data["model"] = DEFAULT_MODEL
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    path.chmod(0o600)
+    with _SAVE_LOCK:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = asdict(config)
+        if data["model"] == bundled_model():
+            data["model"] = DEFAULT_MODEL
+        path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        path.chmod(0o600)

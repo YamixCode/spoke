@@ -1,12 +1,10 @@
 """Окно настроек: оболочка AppKit с панелью разделов и системные формы SwiftUI из spoke/native."""
 from __future__ import annotations
 
-import ctypes
 import json
 import logging
 import os
 import subprocess
-from pathlib import Path
 
 import objc
 from AppKit import (NSApp, NSBackingStoreBuffered, NSImage, NSMakeRect, NSObject, NSToolbar, NSToolbarDisplayModeIconAndLabel,
@@ -14,20 +12,12 @@ from AppKit import (NSApp, NSBackingStoreBuffered, NSImage, NSMakeRect, NSObject
                     NSWindowToolbarStylePreference)
 
 from spoke import __version__, autostart, config as cfg, permissions
+from spoke.apple_speech import available as apple_speech_available
+from spoke.engine import IDLE
+from spoke.native_bridge import load_library
 
-LIBRARY = "libSpokeUI.dylib"
 LOG_PATH = os.path.expanduser("~/Library/Logs/Spoke.log")
 PANES = {"general": ("Основные", "gearshape"), "overlay": ("Плашка и звук", "waveform"), "system": ("Система", "lock.shield")}
-
-
-def library_path() -> Path:
-    candidates = [Path(__file__).resolve().parent / "native" / LIBRARY]
-    if os.environ.get("RESOURCEPATH"):
-        candidates.append(Path(os.environ["RESOURCEPATH"]) / "native" / LIBRARY)
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    raise RuntimeError("Не найдена библиотека окна настроек: соберите её скриптом scripts/build_native.sh")
 
 
 class _Controller(NSObject):
@@ -67,7 +57,7 @@ class _Controller(NSObject):
 class SettingsWindow:
     def __init__(self, config: cfg.Config, engine, on_change=lambda key: None, on_update=lambda: ""):
         self.config, self.engine, self.on_change, self.on_update = config, engine, on_change, on_update
-        ctypes.CDLL(str(library_path()))
+        load_library()
         self.controller = _Controller.alloc().init()
         self.controller.owner = self
         self.bridge = objc.lookUpClass("SpokeSettingsBridge").alloc().initWithConfig_delegate_(json.dumps(self._snapshot()), self.controller)
@@ -90,7 +80,12 @@ class SettingsWindow:
         c = self.config
         return {"version": __version__, "hotkey_title": c.hotkey_title(), "autostart": c.autostart, "overlay": c.overlay,
                 "overlay_bottom_margin": c.overlay_bottom_margin, "sounds": c.sounds, "keep_warm_seconds": c.keep_warm_seconds,
-                "check_updates_on_start": c.check_updates_on_start}
+                "check_updates_on_start": c.check_updates_on_start, "apple_available": apple_speech_available(),
+                **self._recognition_snapshot()}
+
+    def _recognition_snapshot(self) -> dict:
+        return {"recognition_backend": self.engine.pending_backend or self.engine.recognition_backend,
+                "backend_busy": self.engine.state != IDLE, "backend_loading": self.engine.pending_backend is not None}
 
     def select(self, identifier: str, animate: bool = True) -> None:
         self.bridge.stopCapture()
@@ -112,7 +107,7 @@ class SettingsWindow:
         def mark(granted: bool) -> str:
             return "✓ Выдано" if granted else "✕ Не выдано"
         self.bridge.update_(json.dumps({"accessibility": mark(permissions.accessibility_granted()), "input_monitoring": mark(permissions.input_monitoring_granted()),
-                                        "microphone": "Спросит при записи"}))
+                                        "microphone": "Спросит при записи", **self._recognition_snapshot()}))
 
     def show(self) -> None:
         self.refresh_permissions()
@@ -124,6 +119,10 @@ class SettingsWindow:
         return bool(self.window.isVisible())
 
     def changed(self, key: str, value: str) -> None:
+        if key == "recognition_backend":
+            self.engine.switch_backend(value, cfg.save)
+            self.bridge.update_(json.dumps(self._recognition_snapshot()))
+            return
         previous = getattr(self.config, key, None)
         try:
             cfg.set_option(self.config, key, value)

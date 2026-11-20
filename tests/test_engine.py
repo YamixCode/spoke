@@ -1,10 +1,11 @@
 import json
+import time
 
 import pytest
 
 import numpy as np
 
-from spoke import config as cfg
+from spoke import config as cfg, engine as engine_module
 from spoke.engine import IDLE, RECORDING, Engine
 from spoke.transcribe import SAMPLE_RATE, clean, is_silence
 
@@ -101,6 +102,58 @@ def test_app_defaults_apply_to_saved_configuration(tmp_path):
     assert loaded.hotkey_title() == "⌘A" and not loaded.autostart
     assert (loaded.whisper_language(), loaded.history_size, loaded.auto_space, loaded.streaming) == (None, 15, True, True)
     assert cfg.Config().autostart
+
+
+def test_switching_backends_preserves_the_recording_flow_and_saves_choice(monkeypatch, tmp_path):
+    audio = speech()
+    engine, pasted = make(audio)
+    original = engine.transcriber
+    released = []
+    original.close = lambda: released.append(True)
+    apple = FakeTranscriber("Диктовка macOS.")
+    monkeypatch.setattr(engine_module, "make_transcriber", lambda backend, model: apple)
+    path = tmp_path / "config.json"
+    save = lambda config: cfg.save(config, path)
+
+    deadline = time.monotonic() + 2
+    while engine.state != IDLE and time.monotonic() < deadline:
+        time.sleep(0.005)
+    engine._start()
+    engine.switch_backend(cfg.MACOS, save)
+    assert engine.transcriber is original and engine.pending_backend is None
+    engine._cancel()
+    engine.switch_backend(cfg.MACOS, save)
+    deadline = time.monotonic() + 2
+    while engine.state != IDLE and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert engine.transcriber is apple and released == [True]
+    assert cfg.load(path).recognition_backend == cfg.MACOS
+    assert engine.process(audio) == "Диктовка macOS."
+    assert pasted[0][0] == "Диктовка macOS."
+
+
+def test_failing_backend_switch_keeps_the_working_model(monkeypatch):
+    engine, _ = make(speech())
+    original = engine.transcriber
+    apple = FakeTranscriber()
+    saves = []
+
+    def failed():
+        raise RuntimeError("Языковая модель недоступна")
+
+    apple.warm_up = failed
+    monkeypatch.setattr(engine_module, "make_transcriber", lambda backend, model: apple)
+    deadline = time.monotonic() + 2
+    while engine.state != IDLE and time.monotonic() < deadline:
+        time.sleep(0.005)
+    engine.switch_backend(cfg.MACOS, lambda config: saves.append(config))
+    deadline = time.monotonic() + 2
+    while engine.state != IDLE and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert engine.transcriber is original
+    assert saves == []
+    assert engine.recognition_backend == engine.config.recognition_backend == cfg.WHISPER
+    assert engine.pending_backend is None and engine.last_error == "Языковая модель недоступна"
 
 
 def test_consecutive_pastes_are_separated_by_space_but_first_is_not():
