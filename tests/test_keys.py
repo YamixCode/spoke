@@ -10,7 +10,9 @@ CTRL = 0x40000
 def test_modifier_press_and_release_come_from_flags():
     assert classify(FLAGS_CHANGED, 59, CTRL) == ("ctrl", True)
     assert classify(FLAGS_CHANGED, 59, 0) == ("ctrl", False)
-    assert classify(FLAGS_CHANGED, 62, CTRL) == ("ctrl", True)
+    assert classify(FLAGS_CHANGED, 62, CTRL) == ("right_ctrl", True)
+    assert classify(FLAGS_CHANGED, 62, CTRL | 0x01) == ("right_ctrl", False)
+    assert classify(FLAGS_CHANGED, 59, CTRL | 0x2000) == ("ctrl", False)
     assert classify(FLAGS_CHANGED, 61, 0x80000) == ("right_option", True)
     assert classify(FLAGS_CHANGED, 0, CTRL) is None
 
@@ -42,6 +44,15 @@ def test_modifier_shortcut_releases_when_a_required_modifier_is_released():
     right_shift = Shortcut.parse("key:60:0:Правый ⇧")
     assert right_shift.modifier_down(60, 0x20006, held=False)
     assert not right_shift.modifier_down(60, 0x20002, held=True)
+
+
+def test_only_right_ctrl_triggers_its_shortcut_and_releases_with_left_held():
+    right = Shortcut.parse("key:62:0:Правый Ctrl")
+    assert valid_shortcut("right_ctrl")
+    assert not right.modifier_down(59, CTRL | 0x01, held=False)
+    assert right.modifier_down(62, CTRL | 0x2001, held=False)
+    assert right.modifier_down(59, CTRL | 0x2000, held=True)
+    assert not right.modifier_down(62, CTRL | 0x01, held=True)
 
 
 def test_tap_replays_typing_but_consumes_the_shortcut_when_held(monkeypatch):

@@ -157,6 +157,7 @@ class SpokeApp(rumps.App):
         self._refresh_history()
         if self.settings is not None and self.settings.visible:
             self.settings.refresh_permissions()
+            self.settings.refresh_usage()
 
     def _refresh_history(self) -> None:
         history = tuple(self.engine.history)

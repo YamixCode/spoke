@@ -3,7 +3,7 @@ import SwiftUI
 
 private let modifierKeys: [UInt16: (NSEvent.ModifierFlags, String)] = [
     54: (.command, "Правый ⌘"), 55: (.command, "⌘"), 56: (.shift, "⇧"),
-    58: (.option, "⌥"), 59: (.control, "Ctrl"), 60: (.shift, "Правый ⇧"), 61: (.option, "Правый ⌥"),
+    58: (.option, "⌥"), 59: (.control, "Левый Ctrl"), 60: (.shift, "Правый ⇧"), 61: (.option, "Правый ⌥"),
     62: (.control, "Правый Ctrl"), 63: (.function, "Fn")
 ]
 private let shortcutModifiers: [(NSEvent.ModifierFlags, String)] = [
@@ -16,6 +16,15 @@ private let specialKeys: [UInt16: String] = [
 ]
 private let functionKeys: [UInt16] = [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111, 105, 107, 113, 106, 64, 79, 80, 90]
 private let modifierMask = NSEvent.ModifierFlags(shortcutModifiers.map(\.0))
+private let controlSideFlags: [UInt16: UInt] = [59: 0x01, 62: 0x2000]
+
+struct ProviderUsage: Decodable, Equatable {
+    let seconds: Double
+    let input: Int
+    let output: Int
+    let usd: Double
+    let configured: Bool
+}
 
 final class SettingsModel: ObservableObject {
     weak var delegate: NSObject?
@@ -29,6 +38,8 @@ final class SettingsModel: ObservableObject {
     @Published var elevenlabsSaved = false
     @Published var anthropicSaved = false
     @Published var cloudMessage = ""
+    @Published var apiUsage: [String: [String: ProviderUsage]] = [:]
+    @Published var usageMessage = ""
     @Published var autostart: Bool { didSet { send("autostart", autostart) } }
     @Published var overlay: Bool { didSet { send("overlay", overlay) } }
     @Published var overlayMargin: Double { didSet { if overlayMargin.rounded() != oldValue.rounded() { send("overlay_bottom_margin", Int(overlayMargin)) } } }
@@ -75,6 +86,11 @@ final class SettingsModel: ObservableObject {
         if let value = json["elevenlabs_saved"] as? Bool, value != elevenlabsSaved { elevenlabsSaved = value }
         if let value = json["anthropic_saved"] as? Bool, value != anthropicSaved { anthropicSaved = value }
         if let value = json["cloud_message"] as? String, value != cloudMessage { cloudMessage = value }
+        if let value = json["api_usage"], let data = try? JSONSerialization.data(withJSONObject: value),
+           let usage = try? JSONDecoder().decode([String: [String: ProviderUsage]].self, from: data), usage != apiUsage {
+            apiUsage = usage
+        }
+        if let value = json["usage_message"] as? String, value != usageMessage { usageMessage = value }
         suppress = false
     }
 
@@ -113,9 +129,13 @@ final class SettingsModel: ObservableObject {
         let code = event.keyCode
         let flags = event.modifierFlags.intersection(modifierMask)
         if event.type == .flagsChanged, pendingKey == nil, let (flag, title) = modifierKeys[code] {
-            if event.modifierFlags.contains(flag) {
+            let rawFlags = event.modifierFlags.rawValue
+            let controlSides = rawFlags & 0x2001
+            let isPressed = controlSideFlags[code].map { controlSides != 0 ? rawFlags & $0 != 0 : flags.contains(flag) }
+                ?? flags.contains(flag)
+            if isPressed {
                 pendingModifier = (code, flags.subtracting(flag), title)
-            } else if let choice = pendingModifier {
+            } else if let choice = pendingModifier, choice.code == code {
                 accept(choice)
             }
         } else if event.type == .keyDown, !event.isARepeat, pendingKey == nil {
@@ -138,7 +158,7 @@ final class SettingsModel: ObservableObject {
 }
 
 private enum Pane: String {
-    case general, recognition, overlay, system
+    case general, recognition, usage, overlay, system
 }
 
 private struct SettingsPane: View {
@@ -146,12 +166,14 @@ private struct SettingsPane: View {
     let pane: Pane
     @State private var elevenlabsKey = ""
     @State private var anthropicKey = ""
+    @State private var usagePeriod = "month"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             switch pane {
             case .general: general
             case .recognition: recognition
+            case .usage: usage
             case .overlay: overlay
             case .system: system
             }
@@ -211,6 +233,52 @@ private struct SettingsPane: View {
             } label: {
                 Image(systemName: "trash")
             }.disabled(!saved).accessibilityLabel("Удалить ключ " + title)
+        }
+    }
+
+    private var usage: some View {
+        let current = model.apiUsage[usagePeriod] ?? [:]
+        let audio = current["elevenlabs"]
+        let claude = current["anthropic"]
+        return VStack(alignment: .leading, spacing: 14) {
+            Picker("Период", selection: $usagePeriod) {
+                Text("Этот месяц").tag("month")
+                Text("За всё время").tag("all")
+            }.pickerStyle(.segmented).labelsHidden()
+            usageRow("ElevenLabs", meter: audio, url: URL(string: "https://elevenlabs.io/app/developers")!) {
+                Text("\((audio?.seconds ?? 0) / 60, format: .number.precision(.fractionLength(2))) мин аудио")
+            }
+            Divider()
+            usageRow("Anthropic", meter: claude, url: URL(string: "https://platform.claude.com/usage")!) {
+                Text("Вход: \(claude?.input ?? 0, format: .number) · Выход: \(claude?.output ?? 0, format: .number) токенов")
+            }
+            Text(model.usageMessage.isEmpty
+                 ? "Диктовки на этом Mac с текущими ключами. Суммы рассчитаны по тарифам. Баланс и списания — в кабинетах API."
+                 : model.usageMessage)
+                .font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func usageRow(_ title: String, meter: ProviderUsage?, url: URL, detail: () -> Text) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(title).font(.headline)
+                Spacer()
+                if let meter, meter.configured {
+                    Text(meter.usd, format: .currency(code: "USD").precision(.fractionLength(2...6)))
+                        .monospacedDigit()
+                }
+            }
+            HStack {
+                if meter?.configured == true {
+                    detail().monospacedDigit()
+                } else {
+                    Text("Ключ не настроен")
+                }
+                Spacer()
+                Link("Кабинет API ↗", destination: url)
+            }.font(.callout).foregroundStyle(.secondary)
         }
     }
 

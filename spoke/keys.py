@@ -9,9 +9,8 @@ from typing import Callable
 logger = logging.getLogger("spoke")
 
 KEY_DOWN, KEY_UP, FLAGS_CHANGED = 10, 11, 12
-KEYCODES = {59: "ctrl", 62: "ctrl", 61: "right_option", 58: "option", 55: "cmd", 54: "right_cmd", 60: "right_shift", 56: "shift", 53: "esc",
+KEYCODES = {59: "ctrl", 62: "right_ctrl", 61: "right_option", 58: "option", 55: "cmd", 54: "right_cmd", 60: "right_shift", 56: "shift", 53: "esc",
             105: "f13", 107: "f14", 113: "f15", 106: "f16", 64: "f17", 79: "f18", 80: "f19"}
-FLAG_MASKS = {"ctrl": 0x40000, "option": 0x80000, "right_option": 0x80000, "cmd": 0x100000, "right_cmd": 0x100000, "shift": 0x20000, "right_shift": 0x20000}
 MODIFIER_KEYS = {54: 0x100000, 55: 0x100000, 56: 0x20000, 57: 0x10000, 58: 0x80000,
                  59: 0x40000, 60: 0x20000, 61: 0x80000, 62: 0x40000, 63: 0x800000}
 MODIFIER_SIDES = {54: 0x10, 55: 0x08, 56: 0x02, 58: 0x20, 59: 0x01, 60: 0x04, 61: 0x40, 62: 0x2000}
@@ -46,8 +45,10 @@ class Shortcut:
         own = MODIFIER_KEYS[self.keycode]
         if flags & MODIFIERS != self.modifiers | own:
             return False
-        if self.modifiers:
+        if self.modifiers and self.keycode not in MODIFIER_SIDES:
             return held or modifier_pressed(keycode, flags)
+        if self.modifiers and flags & SIDE_MASK:
+            return modifier_pressed(self.keycode, flags)
         return (held or keycode == self.keycode) and modifier_pressed(self.keycode, flags)
 
     def matches_flags(self, flags: int) -> bool:
@@ -73,7 +74,7 @@ def valid_shortcut(value: str) -> bool:
 def classify(event_type: int, keycode: int, flags: int, autorepeat: bool = False) -> tuple[str, bool] | None:
     name = KEYCODES.get(keycode)
     if event_type == FLAGS_CHANGED:
-        return (name, bool(flags & FLAG_MASKS[name])) if name in FLAG_MASKS else None
+        return (name, modifier_pressed(keycode, flags)) if name and keycode in MODIFIER_KEYS else None
     if event_type == KEY_DOWN:
         return None if autorepeat else (name or "char", True)
     if event_type == KEY_UP:
