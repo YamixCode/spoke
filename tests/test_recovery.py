@@ -28,7 +28,7 @@ class FakeTranscriber:
     def warm_up(self):
         pass
 
-    def transcribe(self, audio, language, prompt):
+    def transcribe(self, audio, vocabulary):
         return self.text
 
 
@@ -96,7 +96,7 @@ def test_recovery_keeps_file_when_transcription_fails(tmp_path):
     class Failing(FakeTranscriber):
         calls = 0
 
-        def transcribe(self, audio, language, prompt):
+        def transcribe(self, audio, vocabulary):
             Failing.calls += 1
             raise RuntimeError("модель")
     pending = tmp_path / "recovery.pcm"

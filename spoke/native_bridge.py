@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import json
 import os
 from functools import cache
 from pathlib import Path
@@ -21,3 +22,22 @@ def library_path() -> Path:
 @cache
 def load_library() -> ctypes.CDLL:
     return ctypes.CDLL(str(library_path()))
+
+def call_json(symbol: str, *arguments: bytes):
+    library = load_library()
+    native = getattr(library, symbol)
+    native.argtypes = [ctypes.c_char_p] * len(arguments)
+    native.restype = ctypes.c_void_p
+    pointer = native(*arguments)
+    if not pointer:
+        raise RuntimeError("Spoke не получил ответ от нативной библиотеки")
+    try:
+        answer = json.loads(ctypes.string_at(pointer))
+    finally:
+        release = library.spoke_apple_free
+        release.argtypes = [ctypes.c_void_p]
+        release.restype = None
+        release(pointer)
+    if "error" in answer:
+        raise RuntimeError(answer["error"])
+    return answer

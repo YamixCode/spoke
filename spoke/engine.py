@@ -11,23 +11,18 @@ from pathlib import Path
 import numpy as np
 
 from spoke import inject, sounds
-from spoke.config import MACOS, RECOGNITION_BACKENDS, WHISPER, Config
+from spoke.apple_speech import AppleTranscriber
+from spoke.cleanup import Cleanup
+from spoke.config import Config
 from spoke.history import HistoryStore
 from spoke.hotkey import HoldGate
 from spoke.keys import KeyListener, Shortcut
 from spoke.recorder import Recorder
 from spoke.streaming import StreamSession
-from spoke.transcribe import SAMPLE_RATE, Transcriber, is_silence
+from spoke.transcribe import SAMPLE_RATE, is_silence
 
 logger = logging.getLogger("spoke")
 IDLE, LOADING, RECORDING, WORKING = "idle", "loading", "recording", "working"
-
-
-def make_transcriber(backend: str, model: str):
-    if backend == MACOS:
-        from spoke.apple_speech import AppleTranscriber
-        return AppleTranscriber()
-    return Transcriber(model)
 
 
 class Engine:
@@ -36,9 +31,8 @@ class Engine:
         self.config, self.notify, self.paste = config, notify, paste
         self.recovery_file = recovery_file
         self.recorder = recorder or Recorder(config.max_seconds, recovery_file)
-        self.recognition_backend = config.recognition_backend
-        self.pending_backend = None
-        self.transcriber = transcriber or make_transcriber(self.recognition_backend, config.model)
+        self.cleanup = Cleanup() if transcriber is None else None
+        self.transcriber = transcriber if transcriber is not None else AppleTranscriber(self.cleanup)
         self._state_lock = threading.Lock()
         self.state = LOADING
         self.last_text = ""
@@ -62,7 +56,7 @@ class Engine:
         target = "shortcut" if self.config.hotkey.startswith("key:") else self.config.hotkey
         on_lock = self._start_locked if target != "shortcut" or Shortcut.parse(self.config.hotkey).is_modifier else None
         return HoldGate(target, self.config.hold_ms, self._start, self._stop, self._cancel, on_lock=on_lock,
-                        double_tap_ms=self.config.double_tap_ms, on_press=self._prewarm)
+                        double_tap_ms=self.config.double_tap_ms)
 
     def reload_hotkey(self) -> None:
         self.gate = self._make_gate()
@@ -72,7 +66,6 @@ class Engine:
     def start_listening(self) -> None:
         self._start_listener()
         threading.Thread(target=self._ticker, daemon=True).start()
-        threading.Thread(target=self._keep_warm, daemon=True).start()
 
     def restart_listening(self) -> None:
         if self._listener is not None:
@@ -89,72 +82,6 @@ class Engine:
     def _make_fresh_gate(self) -> None:
         self._cancel()
         self.gate = self._make_gate()
-
-    def _prewarm(self) -> None:
-        transcriber = self.transcriber
-        if self.state == IDLE and hasattr(transcriber, "prewarm"):
-            threading.Thread(target=self._safe_prewarm, args=(transcriber,), daemon=True).start()
-
-    def _safe_prewarm(self, transcriber) -> None:
-        try:
-            transcriber.prewarm()
-        except Exception:
-            logger.exception("Прогрев модели не удался")
-
-    def _keep_warm(self) -> None:
-        while True:
-            seconds = self.config.keep_warm_seconds
-            time.sleep(seconds if seconds > 0 else 5)
-            transcriber = self.transcriber
-            if self.config.keep_warm_seconds <= 0 or not getattr(transcriber, "ready", False) or self.state not in (IDLE, RECORDING):
-                continue
-            try:
-                transcriber.touch()
-                if self.state == IDLE:
-                    transcriber.prewarm(min_idle=0)
-            except Exception:
-                logger.exception("Не удалось поддержать модель в памяти")
-
-    def switch_backend(self, backend: str, save) -> None:
-        with self._state_lock:
-            if backend not in RECOGNITION_BACKENDS or backend == self.recognition_backend or self.state != IDLE:
-                return
-            self.state = LOADING
-            self.pending_backend = backend
-        threading.Thread(target=self._switch_backend, args=(backend, save), daemon=True).start()
-
-    def _switch_backend(self, backend: str, save) -> None:
-        candidate = None
-        previous = self.config.recognition_backend
-        try:
-            candidate = make_transcriber(backend, self.config.model)
-            candidate.warm_up()
-            self.config.recognition_backend = backend
-            save(self.config)
-        except Exception as error:
-            self.config.recognition_backend = previous
-            self._close_transcriber(candidate)
-            self.last_error = str(error)
-            logger.exception("Не удалось переключить распознавание")
-            self.notify("Spoke", f"Не удалось переключить распознавание: {error}")
-        else:
-            old = self.transcriber
-            self.transcriber = candidate
-            self.recognition_backend = backend
-            self.last_error = ""
-            self._close_transcriber(old)
-        finally:
-            self.pending_backend = None
-            self.state = IDLE
-
-    @staticmethod
-    def _close_transcriber(transcriber) -> None:
-        close = getattr(transcriber, "close", None)
-        if close is not None:
-            try:
-                close()
-            except Exception:
-                logger.exception("Не удалось выгрузить модель")
 
     def resize_history(self) -> None:
         self.history = deque(self.history, maxlen=max(1, self.config.history_size))
@@ -187,7 +114,7 @@ class Engine:
         try:
             audio = np.fromfile(path, dtype="<i2").astype(np.float32) / 32767
             if len(audio) >= self.config.min_seconds * SAMPLE_RATE and not is_silence(audio, self.config.silence_rms):
-                text = self.transcriber.transcribe(audio, self.config.whisper_language(), self.config.prompt())
+                text = self.transcriber.transcribe(audio, self.config.vocabulary)
                 if text:
                     self._remember(text)
                     self.notify("Spoke", f"Восстановлена несохранённая диктовка ({len(text)} символов): она в истории.")
@@ -217,7 +144,7 @@ class Engine:
             sounds.play(sounds.START, self.config.sounds)
             if self.config.streaming and hasattr(self.recorder, "snapshot"):
                 c = self.config
-                self._session = StreamSession(self.recorder, self.transcriber, c.whisper_language(), c.prompt(), c.chunk_min_seconds,
+                self._session = StreamSession(self.recorder, self.transcriber, tuple(c.vocabulary), c.chunk_min_seconds,
                                               c.chunk_max_seconds, c.chunk_pause_seconds, c.silence_rms).start()
 
     def _start_locked(self) -> None:
@@ -270,13 +197,7 @@ class Engine:
         except Exception as error:
             self.last_error = f"модель не загрузилась: {error}"
             logger.exception("Не удалось загрузить модель")
-            if self.recognition_backend == MACOS:
-                self.notify("Spoke", f"Диктовка macOS недоступна. Включаю Whisper: {error}")
-                self.recognition_backend = WHISPER
-                self.transcriber = make_transcriber(WHISPER, self.config.model)
-                self._prepare_recognizer()
-            else:
-                self.notify("Spoke", "Модель распознавания не загрузилась.")
+            self.notify("Spoke", self.last_error)
         else:
             self.last_error = ""
 
@@ -303,7 +224,7 @@ class Engine:
         try:
             if seconds >= self.config.min_seconds and not is_silence(audio, self.config.silence_rms):
                 used = True
-                text = session.finish(audio) if session is not None else self.transcriber.transcribe(audio, self.config.whisper_language(), self.config.prompt())
+                text = session.finish(audio) if session is not None else self.transcriber.transcribe(audio, self.config.vocabulary)
                 if text:
                     self._remember(text)
                     self.paste(self._joined(text), self.config.restore_clipboard, self.config.trailing_space)

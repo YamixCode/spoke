@@ -13,7 +13,6 @@ from AppKit import (NSApp, NSBackingStoreBuffered, NSImage, NSMakeRect, NSObject
 
 from spoke import __version__, autostart, config as cfg, permissions
 from spoke.apple_speech import available as apple_speech_available
-from spoke.engine import IDLE
 from spoke.native_bridge import load_library
 
 LOG_PATH = os.path.expanduser("~/Library/Logs/Spoke.log")
@@ -79,13 +78,9 @@ class SettingsWindow:
     def _snapshot(self) -> dict:
         c = self.config
         return {"version": __version__, "hotkey_title": c.hotkey_title(), "autostart": c.autostart, "overlay": c.overlay,
-                "overlay_bottom_margin": c.overlay_bottom_margin, "sounds": c.sounds, "keep_warm_seconds": c.keep_warm_seconds,
+                "overlay_bottom_margin": c.overlay_bottom_margin, "sounds": c.sounds,
                 "check_updates_on_start": c.check_updates_on_start, "apple_available": apple_speech_available(),
-                **self._recognition_snapshot()}
-
-    def _recognition_snapshot(self) -> dict:
-        return {"recognition_backend": self.engine.pending_backend or self.engine.recognition_backend,
-                "backend_busy": self.engine.state != IDLE, "backend_loading": self.engine.pending_backend is not None}
+                "cleanup_status": self.engine.cleanup.status}
 
     def select(self, identifier: str, animate: bool = True) -> None:
         self.bridge.stopCapture()
@@ -107,7 +102,7 @@ class SettingsWindow:
         def mark(granted: bool) -> str:
             return "✓ Выдано" if granted else "✕ Не выдано"
         self.bridge.update_(json.dumps({"accessibility": mark(permissions.accessibility_granted()), "input_monitoring": mark(permissions.input_monitoring_granted()),
-                                        "microphone": "Спросит при записи", **self._recognition_snapshot()}))
+                                        "microphone": "Спросит при записи", "cleanup_status": self.engine.cleanup.status}))
 
     def show(self) -> None:
         self.refresh_permissions()
@@ -119,10 +114,6 @@ class SettingsWindow:
         return bool(self.window.isVisible())
 
     def changed(self, key: str, value: str) -> None:
-        if key == "recognition_backend":
-            self.engine.switch_backend(value, cfg.save)
-            self.bridge.update_(json.dumps(self._recognition_snapshot()))
-            return
         previous = getattr(self.config, key, None)
         try:
             cfg.set_option(self.config, key, value)

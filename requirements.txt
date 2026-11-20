@@ -1,4 +1,4 @@
-mlx-whisper
+tiktoken
 sounddevice
 rumps
 numpy

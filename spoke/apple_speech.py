@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ctypes
 import json
 import os
 import platform
@@ -9,7 +8,7 @@ import tempfile
 
 import numpy as np
 
-from spoke.native_bridge import load_library
+from spoke.native_bridge import call_json
 from spoke.transcribe import SAMPLE_RATE
 
 
@@ -19,15 +18,18 @@ def available() -> bool:
 
 
 class AppleTranscriber:
-    def __init__(self):
+    def __init__(self, cleanup=None):
+        self.cleanup = cleanup
         self._locale = ""
 
     def warm_up(self) -> None:
         if not available():
             raise RuntimeError("Диктовка macOS требует macOS 26 или новее")
         self._locale = self._call("spoke_apple_prepare")
+        if self.cleanup is not None:
+            self.cleanup.prepare()
 
-    def transcribe(self, audio: np.ndarray, language: str | None, prompt: str | None) -> str:
+    def transcribe(self, audio: np.ndarray, vocabulary: tuple[str, ...] | list[str] = ()) -> str:
         if not self._locale:
             self.warm_up()
         samples = (np.clip(audio, -1.0, 1.0) * 32767).astype("<i2")
@@ -42,24 +44,9 @@ class AppleTranscriber:
             file.write(header)
             file.write(samples.tobytes())
             file.flush()
-            return self._call("spoke_apple_transcribe", os.fsencode(file.name), self._locale.encode())
+            text = self._call("spoke_apple_transcribe", os.fsencode(file.name), self._locale.encode(), json.dumps(vocabulary).encode())
+        return self.cleanup.process(text) if self.cleanup is not None else text
 
     @staticmethod
     def _call(symbol: str, *arguments: bytes) -> str:
-        library = load_library()
-        native = getattr(library, symbol)
-        native.argtypes = [ctypes.c_char_p] * len(arguments)
-        native.restype = ctypes.c_void_p
-        pointer = native(*arguments)
-        if not pointer:
-            raise RuntimeError("Распознаватель macOS не вернул результат")
-        try:
-            answer = json.loads(ctypes.string_at(pointer))
-        finally:
-            release = library.spoke_apple_free
-            release.argtypes = [ctypes.c_void_p]
-            release.restype = None
-            release(pointer)
-        if "error" in answer:
-            raise RuntimeError(answer["error"])
-        return answer["text"]
+        return call_json(symbol, *arguments)["text"]

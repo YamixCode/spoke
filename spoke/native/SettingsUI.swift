@@ -24,23 +24,17 @@ final class SettingsModel: ObservableObject {
 
     @Published var hotkeyTitle: String
     @Published var capturing = false
-    @Published var recognitionBackend: String { didSet { send("recognition_backend", recognitionBackend) } }
-    @Published var backendBusy: Bool
-    @Published var backendLoading: Bool
+    @Published var cleanupStatus: String
     @Published var autostart: Bool { didSet { send("autostart", autostart) } }
     @Published var overlay: Bool { didSet { send("overlay", overlay) } }
     @Published var overlayMargin: Double { didSet { if overlayMargin.rounded() != oldValue.rounded() { send("overlay_bottom_margin", Int(overlayMargin)) } } }
     @Published var sounds: Bool { didSet { send("sounds", sounds) } }
-    @Published var keepWarm: Bool { didSet {
-        if oldValue != keepWarm { send("keep_warm_seconds", keepWarm ? warmInterval : 0) }
-    } }
     @Published var checkUpdates: Bool { didSet { send("check_updates_on_start", checkUpdates) } }
     @Published var accessibility = ""
     @Published var inputMonitoring = ""
     @Published var microphone = ""
     @Published var updateStatus = ""
 
-    private let warmInterval: Int
     private var suppress = false
     private var monitor: Any?
     private var pendingKey: (code: UInt16, flags: NSEvent.ModifierFlags, title: String)?
@@ -51,16 +45,11 @@ final class SettingsModel: ObservableObject {
         version = json["version"] as? String ?? ""
         appleAvailable = json["apple_available"] as? Bool ?? false
         hotkeyTitle = json["hotkey_title"] as? String ?? "Ctrl"
-        recognitionBackend = json["recognition_backend"] as? String ?? "whisper"
-        backendBusy = json["backend_busy"] as? Bool ?? false
-        backendLoading = json["backend_loading"] as? Bool ?? false
+        cleanupStatus = json["cleanup_status"] as? String ?? ""
         autostart = json["autostart"] as? Bool ?? true
         overlay = json["overlay"] as? Bool ?? true
         overlayMargin = json["overlay_bottom_margin"] as? Double ?? 14
         sounds = json["sounds"] as? Bool ?? false
-        let interval = json["keep_warm_seconds"] as? Int ?? 45
-        warmInterval = interval > 0 ? interval : 45
-        keepWarm = interval > 0
         checkUpdates = json["check_updates_on_start"] as? Bool ?? true
     }
 
@@ -74,12 +63,9 @@ final class SettingsModel: ObservableObject {
         if let value = json["overlay"] as? Bool, value != overlay { overlay = value }
         if let value = json["overlay_bottom_margin"] as? Double, value != overlayMargin { overlayMargin = value }
         if let value = json["sounds"] as? Bool, value != sounds { sounds = value }
-        if let value = json["keep_warm_seconds"] as? Int, (value > 0) != keepWarm { keepWarm = value > 0 }
         if let value = json["check_updates_on_start"] as? Bool, value != checkUpdates { checkUpdates = value }
         if let value = json["hotkey_title"] as? String, value != hotkeyTitle { hotkeyTitle = value }
-        if let value = json["recognition_backend"] as? String, value != recognitionBackend { recognitionBackend = value }
-        if let value = json["backend_busy"] as? Bool, value != backendBusy { backendBusy = value }
-        if let value = json["backend_loading"] as? Bool, value != backendLoading { backendLoading = value }
+        if let value = json["cleanup_status"] as? String, value != cleanupStatus { cleanupStatus = value }
         suppress = false
     }
 
@@ -166,17 +152,7 @@ private struct SettingsPane: View {
     private var general: some View {
         Group {
             row("Распознавание речи") {
-                Picker("Распознавание речи", selection: $model.recognitionBackend) {
-                    Text("Локальная модель (Whisper)").tag("whisper")
-                    if model.appleAvailable {
-                        Text("Диктовка macOS").tag("macos")
-                    }
-                }
-                .labelsHidden()
-                .disabled(model.backendBusy || !model.appleAvailable)
-                if model.backendLoading {
-                    ProgressView().controlSize(.small).accessibilityLabel("Подготовка распознавателя")
-                }
+                Text("Диктовка macOS + Cleanup").foregroundStyle(.secondary)
             }
             if !model.appleAvailable {
                 detail("Диктовка macOS доступна с macOS 26.")
@@ -215,9 +191,7 @@ private struct SettingsPane: View {
             permission("Мониторинг ввода", model.inputMonitoring, "open_input")
             permission("Микрофон", model.microphone, "open_microphone")
             Divider()
-            option("Ускорять диктовку после простоя", isOn: $model.keepWarm)
-                .disabled(model.recognitionBackend == "macos")
-            detail("Spoke периодически прогревает Whisper, чтобы первая фраза после паузы обработалась быстрее.")
+            row("Cleanup") { Text(model.cleanupStatus).foregroundStyle(.secondary) }
             Divider()
             row("Версия") { Text(model.version).foregroundStyle(.secondary) }
             row("Обновления") {
