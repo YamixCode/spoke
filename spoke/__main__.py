@@ -10,11 +10,11 @@ import time
 def selftest(path: str) -> None:
     from mlx_whisper.audio import load_audio
     from spoke import config as cfg
-    from spoke.transcribe import Transcriber
+    from spoke.engine import make_transcriber
     config = cfg.load()
     import numpy as np
     audio = np.array(load_audio(path), dtype=np.float32)
-    transcriber = Transcriber(config.model)
+    transcriber = make_transcriber(config.recognition_backend, config.model)
     for label in ("холодный (с загрузкой модели)", "тёплый"):
         started = time.monotonic()
         text = transcriber.transcribe(audio, config.whisper_language(), config.prompt())

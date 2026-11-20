@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 
 from spoke import inject, sounds
-from spoke.config import Config
+from spoke.config import MACOS, RECOGNITION_BACKENDS, WHISPER, Config
 from spoke.history import HistoryStore
 from spoke.hotkey import HoldGate
 from spoke.keys import KeyListener, Shortcut
@@ -23,13 +23,23 @@ logger = logging.getLogger("spoke")
 IDLE, LOADING, RECORDING, WORKING = "idle", "loading", "recording", "working"
 
 
+def make_transcriber(backend: str, model: str):
+    if backend == MACOS:
+        from spoke.apple_speech import AppleTranscriber
+        return AppleTranscriber()
+    return Transcriber(model)
+
+
 class Engine:
     def __init__(self, config: Config, notify=lambda title, text: None, recorder=None, transcriber=None, paste=inject.paste_text,
                  history_path: Path | None = None, recovery_file: Path | None = None):
         self.config, self.notify, self.paste = config, notify, paste
         self.recovery_file = recovery_file
         self.recorder = recorder or Recorder(config.max_seconds, recovery_file)
-        self.transcriber = transcriber or Transcriber(config.model)
+        self.recognition_backend = config.recognition_backend
+        self.pending_backend = None
+        self.transcriber = transcriber or make_transcriber(self.recognition_backend, config.model)
+        self._state_lock = threading.Lock()
         self.state = LOADING
         self.last_text = ""
         self.history: deque[str] = deque(maxlen=max(1, config.history_size))
@@ -81,12 +91,13 @@ class Engine:
         self.gate = self._make_gate()
 
     def _prewarm(self) -> None:
-        if self.state == IDLE and hasattr(self.transcriber, "prewarm"):
-            threading.Thread(target=self._safe_prewarm, daemon=True).start()
+        transcriber = self.transcriber
+        if self.state == IDLE and hasattr(transcriber, "prewarm"):
+            threading.Thread(target=self._safe_prewarm, args=(transcriber,), daemon=True).start()
 
-    def _safe_prewarm(self) -> None:
+    def _safe_prewarm(self, transcriber) -> None:
         try:
-            self.transcriber.prewarm()
+            transcriber.prewarm()
         except Exception:
             logger.exception("Прогрев модели не удался")
 
@@ -94,14 +105,56 @@ class Engine:
         while True:
             seconds = self.config.keep_warm_seconds
             time.sleep(seconds if seconds > 0 else 5)
-            if self.config.keep_warm_seconds <= 0 or not getattr(self.transcriber, "ready", False) or self.state not in (IDLE, RECORDING):
+            transcriber = self.transcriber
+            if self.config.keep_warm_seconds <= 0 or not getattr(transcriber, "ready", False) or self.state not in (IDLE, RECORDING):
                 continue
             try:
-                self.transcriber.touch()
+                transcriber.touch()
                 if self.state == IDLE:
-                    self.transcriber.prewarm(min_idle=0)
+                    transcriber.prewarm(min_idle=0)
             except Exception:
                 logger.exception("Не удалось поддержать модель в памяти")
+
+    def switch_backend(self, backend: str, save) -> None:
+        with self._state_lock:
+            if backend not in RECOGNITION_BACKENDS or backend == self.recognition_backend or self.state != IDLE:
+                return
+            self.state = LOADING
+            self.pending_backend = backend
+        threading.Thread(target=self._switch_backend, args=(backend, save), daemon=True).start()
+
+    def _switch_backend(self, backend: str, save) -> None:
+        candidate = None
+        previous = self.config.recognition_backend
+        try:
+            candidate = make_transcriber(backend, self.config.model)
+            candidate.warm_up()
+            self.config.recognition_backend = backend
+            save(self.config)
+        except Exception as error:
+            self.config.recognition_backend = previous
+            self._close_transcriber(candidate)
+            self.last_error = str(error)
+            logger.exception("Не удалось переключить распознавание")
+            self.notify("Spoke", f"Не удалось переключить распознавание: {error}")
+        else:
+            old = self.transcriber
+            self.transcriber = candidate
+            self.recognition_backend = backend
+            self.last_error = ""
+            self._close_transcriber(old)
+        finally:
+            self.pending_backend = None
+            self.state = IDLE
+
+    @staticmethod
+    def _close_transcriber(transcriber) -> None:
+        close = getattr(transcriber, "close", None)
+        if close is not None:
+            try:
+                close()
+            except Exception:
+                logger.exception("Не удалось выгрузить модель")
 
     def resize_history(self) -> None:
         self.history = deque(self.history, maxlen=max(1, self.config.history_size))
@@ -148,29 +201,31 @@ class Engine:
             time.sleep(0.02)
 
     def _start(self) -> None:
-        if self.state != IDLE:
-            return
-        try:
-            self.recorder.start()
-        except Exception as error:
-            self.last_error = f"микрофон недоступен: {error}"
-            logger.exception("Не удалось начать запись")
-            self.notify("Spoke", "Нет доступа к микрофону. Разрешите его в «Системные настройки → Конфиденциальность → Микрофон».")
-            sounds.play(sounds.ERROR, self.config.sounds)
-            return
-        self.state = RECORDING
-        self.recording_since = time.monotonic()
-        sounds.play(sounds.START, self.config.sounds)
-        if self.config.streaming and hasattr(self.recorder, "snapshot"):
-            c = self.config
-            self._session = StreamSession(self.recorder, self.transcriber, c.whisper_language(), c.prompt(), c.chunk_min_seconds,
-                                          c.chunk_max_seconds, c.chunk_pause_seconds, c.silence_rms).start()
+        with self._state_lock:
+            if self.state != IDLE:
+                return
+            try:
+                self.recorder.start()
+            except Exception as error:
+                self.last_error = f"микрофон недоступен: {error}"
+                logger.exception("Не удалось начать запись")
+                self.notify("Spoke", "Нет доступа к микрофону. Разрешите его в «Системные настройки → Конфиденциальность → Микрофон».")
+                sounds.play(sounds.ERROR, self.config.sounds)
+                return
+            self.state = RECORDING
+            self.recording_since = time.monotonic()
+            sounds.play(sounds.START, self.config.sounds)
+            if self.config.streaming and hasattr(self.recorder, "snapshot"):
+                c = self.config
+                self._session = StreamSession(self.recorder, self.transcriber, c.whisper_language(), c.prompt(), c.chunk_min_seconds,
+                                              c.chunk_max_seconds, c.chunk_pause_seconds, c.silence_rms).start()
 
     def _start_locked(self) -> None:
         self.locked = True
         self._start()
         if self.state != RECORDING:
             self.locked = False
+            self.gate.release_lock()
         else:
             self.recorder.max_seconds = max(self.recorder.max_seconds, self.config.locked_max_seconds)
 
@@ -202,17 +257,28 @@ class Engine:
         self._jobs.put((audio, session))
 
     def _worker(self) -> None:
-        try:
-            self.transcriber.warm_up()
-        except Exception as error:
-            self.last_error = f"модель не загрузилась: {error}"
-            logger.exception("Не удалось загрузить модель")
-            self.notify("Spoke", "Модель распознавания не загрузилась.")
+        self._prepare_recognizer()
         self._recover()
         self.state = IDLE
         while True:
             audio, session = self._jobs.get()
             self.process(audio, session)
+
+    def _prepare_recognizer(self) -> None:
+        try:
+            self.transcriber.warm_up()
+        except Exception as error:
+            self.last_error = f"модель не загрузилась: {error}"
+            logger.exception("Не удалось загрузить модель")
+            if self.recognition_backend == MACOS:
+                self.notify("Spoke", f"Диктовка macOS недоступна. Включаю Whisper: {error}")
+                self.recognition_backend = WHISPER
+                self.transcriber = make_transcriber(WHISPER, self.config.model)
+                self._prepare_recognizer()
+            else:
+                self.notify("Spoke", "Модель распознавания не загрузилась.")
+        else:
+            self.last_error = ""
 
     def paste_from_history(self, index: int = 0) -> bool:
         """Вставить прежнюю диктовку туда, где сейчас курсор (из меню: даём меню закрыться и вернуть фокус)."""
