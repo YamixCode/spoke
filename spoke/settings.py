@@ -13,10 +13,12 @@ from AppKit import (NSApp, NSBackingStoreBuffered, NSImage, NSMakeRect, NSObject
 
 from spoke import __version__, autostart, config as cfg, permissions
 from spoke.apple_speech import available as apple_speech_available
+from spoke.cloud import PROVIDERS, keychain_read, keychain_remove, keychain_save
 from spoke.native_bridge import load_library
 
 LOG_PATH = os.path.expanduser("~/Library/Logs/Spoke.log")
-PANES = {"general": ("Основные", "gearshape"), "overlay": ("Плашка и звук", "waveform"), "system": ("Система", "lock.shield")}
+PANES = {"general": ("Основные", "gearshape"), "recognition": ("Распознавание", "text.bubble"),
+         "overlay": ("Плашка и звук", "waveform"), "system": ("Система", "lock.shield")}
 
 
 class _Controller(NSObject):
@@ -80,10 +82,24 @@ class SettingsWindow:
         return {"version": __version__, "hotkey_title": c.hotkey_title(), "autostart": c.autostart, "overlay": c.overlay,
                 "overlay_bottom_margin": c.overlay_bottom_margin, "sounds": c.sounds,
                 "check_updates_on_start": c.check_updates_on_start, "apple_available": apple_speech_available(),
-                "cleanup_status": self.engine.cleanup.status}
+                "cleanup_status": self._cleanup_status(), "dictation_mode": c.dictation_mode}
+
+    def _cleanup_status(self) -> str:
+        return "Локальный режим выключен" if self.config.dictation_mode == "cloud" else self.engine.cleanup.status
+
+    def _refresh_keys(self, message: str = "") -> None:
+        values = {}
+        try:
+            for provider in PROVIDERS:
+                values[provider + "_saved"] = bool(keychain_read(provider))
+        except RuntimeError as error:
+            message = str(error)
+        self.bridge.update_(json.dumps({**values, "cloud_message": message}))
 
     def select(self, identifier: str, animate: bool = True) -> None:
         self.bridge.stopCapture()
+        if identifier == "recognition":
+            self._refresh_keys()
         self.toolbar.setSelectedItemIdentifier_(identifier)
         self.window.setTitle_(PANES[identifier][0])
         if identifier not in self.panes:
@@ -102,10 +118,12 @@ class SettingsWindow:
         def mark(granted: bool) -> str:
             return "✓ Выдано" if granted else "✕ Не выдано"
         self.bridge.update_(json.dumps({"accessibility": mark(permissions.accessibility_granted()), "input_monitoring": mark(permissions.input_monitoring_granted()),
-                                        "microphone": "Спросит при записи", "cleanup_status": self.engine.cleanup.status}))
+                                        "microphone": "Спросит при записи", "cleanup_status": self._cleanup_status()}))
 
     def show(self) -> None:
         self.refresh_permissions()
+        if self.toolbar.selectedItemIdentifier() == "recognition":
+            self._refresh_keys()
         NSApp.activateIgnoringOtherApps_(True)
         self.window.makeKeyAndOrderFront_(None)
 
@@ -114,6 +132,14 @@ class SettingsWindow:
         return bool(self.window.isVisible())
 
     def changed(self, key: str, value: str) -> None:
+        if key.startswith("api_key_") and (provider := key.removeprefix("api_key_")) in PROVIDERS:
+            try:
+                keychain_save(provider, value)
+            except (ValueError, RuntimeError) as error:
+                self._refresh_keys(str(error))
+            else:
+                self._refresh_keys()
+            return
         previous = getattr(self.config, key, None)
         try:
             cfg.set_option(self.config, key, value)
@@ -131,6 +157,8 @@ class SettingsWindow:
         if key == "hotkey":
             self.engine.reload_hotkey()
             self.bridge.update_(json.dumps({"hotkey_title": self.config.hotkey_title()}))
+        elif key == "dictation_mode":
+            self.refresh_permissions()
         self.on_change(key)
 
     def action(self, name: str) -> None:
@@ -144,3 +172,10 @@ class SettingsWindow:
             self.bridge.update_(json.dumps({"update_status": self.on_update()}))
         elif name == "show_log":
             subprocess.run(["open", "-R", LOG_PATH], check=False)
+        elif name.startswith("remove_key_") and (provider := name.removeprefix("remove_key_")) in PROVIDERS:
+            try:
+                keychain_remove(provider)
+            except RuntimeError as error:
+                self._refresh_keys(str(error))
+            else:
+                self._refresh_keys()

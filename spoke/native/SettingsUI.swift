@@ -25,6 +25,10 @@ final class SettingsModel: ObservableObject {
     @Published var hotkeyTitle: String
     @Published var capturing = false
     @Published var cleanupStatus: String
+    @Published var dictationMode: String { didSet { send("dictation_mode", dictationMode) } }
+    @Published var elevenlabsSaved = false
+    @Published var anthropicSaved = false
+    @Published var cloudMessage = ""
     @Published var autostart: Bool { didSet { send("autostart", autostart) } }
     @Published var overlay: Bool { didSet { send("overlay", overlay) } }
     @Published var overlayMargin: Double { didSet { if overlayMargin.rounded() != oldValue.rounded() { send("overlay_bottom_margin", Int(overlayMargin)) } } }
@@ -46,6 +50,7 @@ final class SettingsModel: ObservableObject {
         appleAvailable = json["apple_available"] as? Bool ?? false
         hotkeyTitle = json["hotkey_title"] as? String ?? "Ctrl"
         cleanupStatus = json["cleanup_status"] as? String ?? ""
+        dictationMode = json["dictation_mode"] as? String ?? "local"
         autostart = json["autostart"] as? Bool ?? true
         overlay = json["overlay"] as? Bool ?? true
         overlayMargin = json["overlay_bottom_margin"] as? Double ?? 14
@@ -66,6 +71,10 @@ final class SettingsModel: ObservableObject {
         if let value = json["check_updates_on_start"] as? Bool, value != checkUpdates { checkUpdates = value }
         if let value = json["hotkey_title"] as? String, value != hotkeyTitle { hotkeyTitle = value }
         if let value = json["cleanup_status"] as? String, value != cleanupStatus { cleanupStatus = value }
+        if let value = json["dictation_mode"] as? String, value != dictationMode { dictationMode = value }
+        if let value = json["elevenlabs_saved"] as? Bool, value != elevenlabsSaved { elevenlabsSaved = value }
+        if let value = json["anthropic_saved"] as? Bool, value != anthropicSaved { anthropicSaved = value }
+        if let value = json["cloud_message"] as? String, value != cloudMessage { cloudMessage = value }
         suppress = false
     }
 
@@ -129,17 +138,20 @@ final class SettingsModel: ObservableObject {
 }
 
 private enum Pane: String {
-    case general, overlay, system
+    case general, recognition, overlay, system
 }
 
 private struct SettingsPane: View {
     @ObservedObject var model: SettingsModel
     let pane: Pane
+    @State private var elevenlabsKey = ""
+    @State private var anthropicKey = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             switch pane {
             case .general: general
+            case .recognition: recognition
             case .overlay: overlay
             case .system: system
             }
@@ -151,12 +163,6 @@ private struct SettingsPane: View {
 
     private var general: some View {
         Group {
-            row("Распознавание речи") {
-                Text("Диктовка macOS + Cleanup").foregroundStyle(.secondary)
-            }
-            if !model.appleAvailable {
-                detail("Диктовка macOS доступна с macOS 26.")
-            }
             row("Клавиша диктовки") {
                 Button(model.capturing ? "Отменить" : model.hotkeyTitle) {
                     if model.capturing { model.stopCapture() } else { model.startCapture() }
@@ -167,6 +173,44 @@ private struct SettingsPane: View {
             detail(model.capturing ? "Нажмите и отпустите клавишу или сочетание." : "Нажмите, чтобы назначить клавишу или сочетание.")
             Divider()
             option("Запускать при входе в систему", isOn: $model.autostart)
+        }
+    }
+
+    private var recognition: some View {
+        Group {
+            row("Распознавание речи") {
+                Picker("Распознавание речи", selection: $model.dictationMode) {
+                    Text("Диктовка macOS + Cleanup").tag("local")
+                    Text("Scribe v3 Live + Haiku").tag("cloud")
+                }
+                .labelsHidden()
+            }
+            Text("В облачном режиме звук отправляется в ElevenLabs, а распознанный текст — в Anthropic. Ключи хранятся в связке ключей macOS.")
+                .font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Divider()
+            keyRow("ElevenLabs", account: "elevenlabs", saved: model.elevenlabsSaved, key: $elevenlabsKey)
+            keyRow("Anthropic", account: "anthropic", saved: model.anthropicSaved, key: $anthropicKey)
+            Text(model.cloudMessage.isEmpty ? "Для облачного режима нужны оба ключа." : model.cloudMessage)
+                .font(.callout).foregroundStyle(.secondary).lineLimit(1).help(model.cloudMessage)
+        }
+        .onDisappear { elevenlabsKey = ""; anthropicKey = "" }
+    }
+
+    private func keyRow(_ title: String, account: String, saved: Bool, key: Binding<String>) -> some View {
+        HStack(spacing: 10) {
+            Text(title).frame(width: 110, alignment: .trailing)
+            SecureField(saved ? "Ключ сохранён" : "Ключ API", text: key)
+                .accessibilityLabel("Ключ API " + title)
+            Button("Сохранить") {
+                model.send("api_key_" + account, key.wrappedValue)
+                key.wrappedValue = ""
+            }.disabled(key.wrappedValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            Button {
+                model.act("remove_key_" + account)
+            } label: {
+                Image(systemName: "trash")
+            }.disabled(!saved).accessibilityLabel("Удалить ключ " + title)
         }
     }
 

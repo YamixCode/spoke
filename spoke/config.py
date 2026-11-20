@@ -43,6 +43,7 @@ class Config:
     overlay_bottom_margin: float = 14.0
     overlay: bool = True
     autostart: bool = True
+    dictation_mode: str = "local"
     vocabulary: list[str] = field(default_factory=list)
 
     def apply_app_defaults(self) -> None:
@@ -67,6 +68,8 @@ INTEGERS = ("hold_ms", "double_tap_ms", "history_size")
 def set_option(config: "Config", key: str, text: str) -> None:
     if key == "vocabulary":
         config.vocabulary = [line.strip() for line in text.splitlines() if line.strip()]
+    elif key == "dictation_mode" and text in ("local", "cloud"):
+        config.dictation_mode = text
     elif key in BOOLEANS:
         setattr(config, key, text.strip().lower() == "true")
     elif key in INTEGERS:
@@ -95,6 +98,8 @@ def load(path: Path | None = None) -> Config:
             setattr(config, key, value)
     if not valid_shortcut(config.hotkey):
         config.hotkey = "ctrl"
+    if config.dictation_mode not in ("local", "cloud"):
+        config.dictation_mode = "local"
     config.hold_ms = max(100, min(int(config.hold_ms), 2000))
     return config
 

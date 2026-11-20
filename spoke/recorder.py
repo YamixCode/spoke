@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import queue
 import threading
+from bisect import bisect_right
 from pathlib import Path
 
 import numpy as np
@@ -17,7 +18,7 @@ class Recorder:
         self.journal = journal
         self._journal_queue: queue.Queue | None = None
         self._journal_writer: threading.Thread | None = None
-        self._chunks: list[np.ndarray] = []
+        self._chunks: list[tuple[int, np.ndarray]] = []
         self._stream = None
         self._lock = threading.Lock()
         self.level = 0.0
@@ -36,18 +37,27 @@ class Recorder:
 
             def callback(indata, frames, time_info, status):           # noqa: ARG001
                 self.level = float(np.sqrt(np.mean(np.square(indata[:, 0]))))
-                if sum(len(c) for c in self._chunks) < self.max_seconds * SAMPLE_RATE:
-                    chunk = indata[:, 0].copy()
-                    self._chunks.append(chunk)
+                offset = self._chunks[-1][0] if self._chunks else 0
+                remaining = self.max_seconds * SAMPLE_RATE - offset
+                if remaining > 0:
+                    chunk = indata[:remaining, 0].copy()
+                    self._chunks.append((offset + len(chunk), chunk))
                     if self._journal_queue is not None:
                         self._journal_queue.put(chunk)
             self._stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32", callback=callback)
             self._stream.start()
 
     def snapshot(self) -> np.ndarray:
-        """Всё записанное к этому моменту (запись продолжается): по нему идёт распознавание кусков на лету."""
-        chunks = list(self._chunks)
-        return np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)
+        return self.snapshot_from(0)
+
+    def snapshot_from(self, offset: int) -> np.ndarray:
+        chunks = self._chunks
+        first = bisect_right(chunks, offset, key=lambda entry: entry[0])
+        pending = chunks[first:]
+        if not pending:
+            return np.zeros(0, dtype=np.float32)
+        end, chunk = pending[0]
+        return np.concatenate([chunk[offset - (end - len(chunk)):], *(data for _, data in pending[1:])])
 
     def stop(self) -> np.ndarray:
         """Останавливает запись и возвращает звук (пустой массив, если не писали)."""
@@ -59,7 +69,7 @@ class Recorder:
         self.level = 0.0
         self._close_journal()
         chunks, self._chunks = self._chunks, []
-        return np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)
+        return np.concatenate([data for _, data in chunks]) if chunks else np.zeros(0, dtype=np.float32)
 
     def cancel(self) -> None:
         self.stop()
