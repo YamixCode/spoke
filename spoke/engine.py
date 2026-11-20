@@ -13,6 +13,7 @@ import numpy as np
 from spoke import inject, sounds
 from spoke.apple_speech import AppleTranscriber
 from spoke.cleanup import Cleanup
+from spoke.cloud import CloudKeys, CloudSession
 from spoke.config import Config
 from spoke.history import HistoryStore
 from spoke.hotkey import HoldGate
@@ -42,7 +43,7 @@ class Engine:
             self.history.extend(self._store.load())
         self.last_seconds = 0.0
         self.last_error = ""
-        self._session: StreamSession | None = None
+        self._session: StreamSession | CloudSession | None = None
         self.locked = False
         self.recording_since = 0.0
         self._last_paste_at: float | None = None
@@ -114,7 +115,7 @@ class Engine:
         try:
             audio = np.fromfile(path, dtype="<i2").astype(np.float32) / 32767
             if len(audio) >= self.config.min_seconds * SAMPLE_RATE and not is_silence(audio, self.config.silence_rms):
-                text = self.transcriber.transcribe(audio, self.config.vocabulary)
+                text = self._transcribe(audio)
                 if text:
                     self._remember(text)
                     self.notify("Spoke", f"Восстановлена несохранённая диктовка ({len(text)} символов): она в истории.")
@@ -131,6 +132,15 @@ class Engine:
         with self._state_lock:
             if self.state != IDLE:
                 return
+            keys = None
+            if self._cloud_enabled:
+                try:
+                    keys = CloudKeys.read()
+                except RuntimeError as error:
+                    self.last_error = str(error)
+                    self.notify("Spoke", self.last_error)
+                    sounds.play(sounds.ERROR, self.config.sounds)
+                    return
             try:
                 self.recorder.start()
             except Exception as error:
@@ -142,7 +152,9 @@ class Engine:
             self.state = RECORDING
             self.recording_since = time.monotonic()
             sounds.play(sounds.START, self.config.sounds)
-            if self.config.streaming and hasattr(self.recorder, "snapshot"):
+            if keys is not None:
+                self._session = CloudSession(keys, self.config.vocabulary, self.recorder.snapshot_from, self.notify).start()
+            elif self.config.streaming and hasattr(self.recorder, "snapshot"):
                 c = self.config
                 self._session = StreamSession(self.recorder, self.transcriber, tuple(c.vocabulary), c.chunk_min_seconds,
                                               c.chunk_max_seconds, c.chunk_pause_seconds, c.silence_rms).start()
@@ -192,6 +204,8 @@ class Engine:
             self.process(audio, session)
 
     def _prepare_recognizer(self) -> None:
+        if self._cloud_enabled:
+            return
         try:
             self.transcriber.warm_up()
         except Exception as error:
@@ -215,7 +229,17 @@ class Engine:
             return " " + text
         return text
 
-    def process(self, audio, session: StreamSession | None = None) -> str:
+    @property
+    def _cloud_enabled(self) -> bool:
+        return self.cleanup is not None and self.config.dictation_mode == "cloud"
+
+    def _transcribe(self, audio) -> str:
+        if self._cloud_enabled:
+            session = CloudSession(CloudKeys.read(), self.config.vocabulary, lambda offset: audio[offset:], self.notify)
+            return session.start().finish(audio)
+        return self.transcriber.transcribe(audio, self.config.vocabulary)
+
+    def process(self, audio, session: StreamSession | CloudSession | None = None) -> str:
         """Звук → текст → вставка. Возвращает вставленный текст (пустая строка, если нечего вставлять).
         С потоковой сессией большая часть речи уже распознана: остаётся хвост."""
         started = time.monotonic()
@@ -224,7 +248,7 @@ class Engine:
         try:
             if seconds >= self.config.min_seconds and not is_silence(audio, self.config.silence_rms):
                 used = True
-                text = session.finish(audio) if session is not None else self.transcriber.transcribe(audio, self.config.vocabulary)
+                text = session.finish(audio) if session is not None else self._transcribe(audio)
                 if text:
                     self._remember(text)
                     self.paste(self._joined(text), self.config.restore_clipboard, self.config.trailing_space)

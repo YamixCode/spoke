@@ -23,7 +23,7 @@ OPTIONS = {
         "CFBundleVersion": SHELL_API,
         "LSUIElement": True,
         "LSMinimumSystemVersion": "26.0",
-        "NSMicrophoneUsageDescription": "Spoke записывает вашу речь, чтобы превратить её в текст. Звук обрабатывается на этом Mac и никуда не отправляется.",
+        "NSMicrophoneUsageDescription": "Spoke записывает вашу речь для диктовки. При выборе облачного режима звук отправляется в ElevenLabs для распознавания.",
     },
 }
 
