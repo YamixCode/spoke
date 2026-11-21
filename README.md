@@ -28,6 +28,8 @@
 
 Если обновлению нужны новые библиотеки (повышен `SHELL_API`), приложение предложит скачать свежий DMG из релиза. Репозиторий публичный, токен не нужен; для приватного форка задайте переменную `SPOKE_GITHUB_TOKEN`.
 
+Сборки с Developer ID запускают код из подписанного приложения. Для обновления они открывают страницу релиза с новым DMG.
+
 ## Разработка
 
 ```
@@ -51,6 +53,15 @@ python3 -m venv .venv && .venv/bin/pip install -r requirements-dev.txt
 ```
 
 Результат: `dist/Spoke.app` и `dist/Spoke.dmg`. В локальном режиме модель Cleanup скачивается только при необходимости и работает на Mac.
+
+Для распространения через DMG нужен сертификат **Developer ID Application** с закрытым ключом в связке ключей и профиль `notarytool`. Создайте профиль через `xcrun notarytool store-credentials`. Имя профиля и имя сертификата передаются скрипту сборки.
+
+```sh
+SPOKE_DEVELOPER_ID='Developer ID Application: Имя команды (TEAMID)' \
+SPOKE_NOTARY_PROFILE='spoke-notary' ./packaging/build.sh
+```
+
+Скрипт подписывает приложение и образ, отправляет DMG на нотарификацию, прикрепляет билет и проверяет результат через Gatekeeper. Прикладывайте этот DMG к каждому релизу для подписанных установок. [Руководство Apple по нотарификации](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)
 
 ## Выпуск релиза
 

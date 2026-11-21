@@ -88,10 +88,16 @@ def fetch(url: str, token: str = "", accept: str = "application/vnd.github+json"
 def latest_release(token: str = "") -> Release:
     data = json.loads(fetch(f"{API}/repos/{REPO}/releases/latest", token))
     assets = {asset["name"]: asset["url"] for asset in data.get("assets", [])}
+    version = str(data["tag_name"]).lstrip("vV")
+    page = data.get("html_url") or f"https://github.com/{REPO}/releases/latest"
+    if uses_signed_distribution():
+        if parse_version(version) > parse_version(__version__) and not any(name.lower().endswith(".dmg") for name in assets):
+            raise UpdateError(f"У Spoke {version} пока нет установочного DMG.")
+        return Release(version, data.get("body") or "", page, "", "")
     code = next((name for name in assets if re.fullmatch(r"spoke-code-[\d.]+\.zip", name)), None)
     if code is None or f"{code}.sha256" not in assets:
         raise UpdateError("В последнем релизе нет архива с кодом обновления")
-    return Release(str(data["tag_name"]).lstrip("vV"), data.get("body") or "", data.get("html_url", ""), assets[code], assets[f"{code}.sha256"])
+    return Release(version, data.get("body") or "", page, assets[code], assets[f"{code}.sha256"])
 
 
 def check(token: str = "") -> Release | None:
@@ -126,6 +132,17 @@ def installed_shell_api() -> int | None:
         return None
 
 
+def uses_signed_distribution() -> bool:
+    resources = os.environ.get("RESOURCEPATH")
+    if not resources:
+        return False
+    try:
+        info = (Path(resources).parent / "Info.plist").read_bytes()
+        return plistlib.loads(info).get("SpokeSignedDistribution") is True
+    except (OSError, plistlib.InvalidFileException):
+        return False
+
+
 def _extract(archive: bytes, destination: Path) -> None:
     with zipfile.ZipFile(io.BytesIO(archive)) as bundle:
         for name in bundle.namelist():
@@ -153,6 +170,8 @@ def _validate(package: Path, release: Release, shell_api: int | None) -> None:
 
 
 def apply(release: Release, token: str = "", code_dir: Path = CODE_DIR, shell_api: int | None = None) -> None:
+    if uses_signed_distribution():
+        raise UpdateError("Для подписанной сборки установите DMG со страницы релиза.")
     archive = fetch(release.code_url, token, "application/octet-stream")
     expected = fetch(release.checksum_url, token, "application/octet-stream").decode().split()[0].lower()
     if hashlib.sha256(archive).hexdigest() != expected:
