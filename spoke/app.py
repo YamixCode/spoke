@@ -2,14 +2,16 @@
 from __future__ import annotations
 
 import logging
+import math
 import os
 import threading
 import time
 from pathlib import Path
+from queue import Empty, SimpleQueue
 
 import rumps
-from AppKit import NSImage
-from Foundation import NSActivityLatencyCritical, NSActivityUserInitiatedAllowingIdleSystemSleep, NSProcessInfo
+from AppKit import NSApp, NSImage, NSWorkspace
+from Foundation import NSActivityLatencyCritical, NSActivityUserInitiatedAllowingIdleSystemSleep, NSProcessInfo, NSURL
 
 from spoke import __version__, autostart, config as cfg, inject, permissions, updater
 from spoke.settings import SettingsWindow
@@ -26,6 +28,8 @@ class SpokeApp(rumps.App):
     def __init__(self, config: cfg.Config):
         super().__init__("Spoke", title=None, icon=str(ASSETS / ICONS[LOADING][0]), template=True, quit_button=None)
         self._shown_icon = None
+        self._preview_started = 0.0
+        self._preview_mode = RECORD
         self.config = config
         self.engine = Engine(config, notify=lambda title, text: rumps.notification(title, "", text), history_path=cfg.HISTORY_FILE, recovery_file=cfg.RECOVERY_FILE)
         self.status_item = rumps.MenuItem(STATUS[LOADING])
@@ -36,14 +40,17 @@ class SpokeApp(rumps.App):
         self._refresh_history()
         self.settings = None
         self.update_item = rumps.MenuItem("Проверить обновления…", callback=self.check_updates)
+        self._checking_update = False
+        self._update_results = SimpleQueue()
         self._available: updater.Release | None = None
         self.menu = [self.status_item, None, self.paste_last_item, self.copy_last_item, self.history_menu, None,
                      rumps.MenuItem("Настройки…", callback=self._open_settings, key=","), self.update_item, None,
                      rumps.MenuItem("Выйти", callback=rumps.quit_application)]
         self._timer = rumps.Timer(self._refresh, 0.25)
         self._timer.start()
-        self.overlay = Overlay(config.overlay_bottom_margin, self.engine.cancel_locked, self.engine.finish_locked) if config.overlay else None
-        self._overlay_timer = rumps.Timer(self._animate, 0.05)
+        self.overlay = None
+        self.apply_overlay()
+        self._overlay_timer = rumps.Timer(self._animate, 0.025)
         self._overlay_timer.start()
         self._permissions_ok = permissions.all_granted()
         if not self._permissions_ok:
@@ -60,30 +67,63 @@ class SpokeApp(rumps.App):
         except Exception:
             logging.getLogger("spoke").exception("Не удалось проверить обновления")
 
-    def check_updates(self, _=None) -> str:
+    def _update_status(self, message: str, checking: bool = False) -> None:
+        self._checking_update = checking
+        self.update_item.title = "Проверяю обновления…" if checking else "Проверить обновления…"
+        if self.settings is not None:
+            self.settings.update_status(message, checking)
+
+    def check_updates(self, _=None) -> None:
+        if self._checking_update:
+            return
+        self._update_status("Проверяю обновления…", checking=True)
+        threading.Thread(target=self._check_updates_requested, daemon=True).start()
+
+    def _check_updates_requested(self) -> None:
         try:
             release = updater.check(self.config.token())
         except updater.UpdateError as error:
-            return self._say(str(error))
+            self._update_results.put((None, str(error)))
+        except Exception:
+            logging.getLogger("spoke").exception("Не удалось проверить обновления")
+            self._update_results.put((None, "Не удалось прочитать данные последнего релиза."))
+        else:
+            self._update_results.put((release, ""))
+
+    def _show_update_result(self, release, error: str = "") -> None:
+        NSApp.activateIgnoringOtherApps_(True)
+        if error:
+            self._update_status(error)
+            rumps.alert(title="Не удалось проверить обновления", message=error, ok="ОК")
+            return
         if release is None:
             self._available = None
-            return self._say(f"Установлена последняя версия ({__version__})")
+            message = f"Установлена актуальная версия Spoke {__version__}."
+            self._update_status(message)
+            rumps.alert(title="Обновлений нет", message=message, ok="ОК")
+            return
+        self._available = release
+        self._update_status(f"Доступен Spoke {release.version}.")
         notes = updater.release_notes(release.notes)[:600] or "Установить обновление?"
+        if updater.uses_signed_distribution():
+            if rumps.alert(title=f"Доступно обновление {release.version}", message=notes,
+                           ok="Открыть страницу релиза", cancel="Позже"):
+                NSWorkspace.sharedWorkspace().openURL_(NSURL.URLWithString_(release.page))
+            return
         if not rumps.alert(title=f"Доступно обновление {release.version}", message=notes, ok="Обновить", cancel="Позже"):
-            return "Обновление отложено"
+            return
         try:
             updater.apply(release, self.config.token())
         except updater.UpdateError as error:
-            return self._say(str(error))
+            self._update_status(str(error))
+            rumps.alert(title="Не удалось установить обновление", message=str(error), ok="ОК")
+            return
         if updater.restart():
             rumps.notification("Spoke", "Обновление установлено", "Перезапускаюсь…")
             rumps.quit_application()
-            return "Обновление установлено, перезапуск…"
-        return self._say("Обновление установлено, перезапустите Spoke")
-
-    def _say(self, message: str) -> str:
-        rumps.notification("Spoke", "", message)
-        return message
+            return
+        self._update_status("Обновление установлено. Перезапустите Spoke.")
+        rumps.alert(title="Обновление установлено", message="Перезапустите Spoke.", ok="ОК")
 
     def _check_permissions(self) -> None:
         granted = permissions.all_granted()
@@ -93,12 +133,17 @@ class SpokeApp(rumps.App):
 
     def _open_settings(self, _) -> None:
         if self.settings is None:
-            self.settings = SettingsWindow(self.config, self.engine, self._settings_changed, self.check_updates)
+            self.settings = SettingsWindow(self.config, self.engine, self._settings_changed, self.check_updates, self._preview_overlay)
         self.settings.show()
 
     def _settings_changed(self, key: str) -> None:
-        if key in ("overlay", "overlay_bottom_margin"):
+        if key in ("overlay", "overlay_bottom_margin", "overlay_size"):
             self.apply_overlay()
+
+    def _preview_overlay(self, mode: str) -> None:
+        if self.overlay is not None and self.engine.state == IDLE:
+            self._preview_mode = mode
+            self._preview_started = time.monotonic()
 
     def apply_overlay(self) -> None:
         if self.config.overlay and self.overlay is None:
@@ -108,6 +153,7 @@ class SpokeApp(rumps.App):
             self.overlay = None
         if self.overlay is not None:
             self.overlay.set_bottom_margin(self.config.overlay_bottom_margin)
+            self.overlay.set_size(self.config.overlay_size)
 
     def _open_permissions(self, _) -> None:
         permissions.open_settings()
@@ -131,13 +177,29 @@ class SpokeApp(rumps.App):
             return
         state = self.engine.state
         if state == RECORDING:
+            self._preview_started = 0.0
             self.overlay.update(RECORD, getattr(self.engine.recorder, "level", 0.0), self.engine.locked)
         elif state == WORKING:
             self.overlay.update(WORK)
         else:
-            self.overlay.update(None)
+            elapsed = time.monotonic() - self._preview_started
+            if elapsed < 4.6:
+                if self._preview_mode == WORK:
+                    self.overlay.update(WORK)
+                else:
+                    phrase = max(0.0, math.sin(elapsed * 3.0))
+                    syllable = 0.35 + 0.65 * (0.5 + 0.5 * math.sin(elapsed * 15)) ** 2
+                    self.overlay.update(RECORD, 0.002 + 0.065 * phrase * syllable)
+            else:
+                self.overlay.update(None)
 
     def _refresh(self, _) -> None:
+        try:
+            update_result = self._update_results.get_nowait()
+        except Empty:
+            pass
+        else:
+            self._show_update_result(*update_result)
         state = self.engine.state
         self._show_icon(state)
         self._check_permissions()

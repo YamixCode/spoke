@@ -17,6 +17,7 @@ LEGACY_CONFIG_PATH = Path.home() / ".config" / "localflow" / "config.json"
 _SAVE_LOCK = threading.Lock()
 HOTKEY_NAMES = {"ctrl": "Левый Ctrl", "right_ctrl": "Правый Ctrl", "option": "Option", "right_option": "Правый Option", "cmd": "Cmd", "right_cmd": "Правый Cmd",
                 "shift": "Shift", "right_shift": "Правый Shift"}
+OVERLAY_SIZE_MIN, OVERLAY_SIZE_MAX = 36, 84
 
 
 @dataclass
@@ -42,6 +43,7 @@ class Config:
     join_window_seconds: float = 90.0
     overlay_bottom_margin: float = 14.0
     overlay: bool = True
+    overlay_size: int = 60
     autostart: bool = True
     dictation_mode: str = "local"
     vocabulary: list[str] = field(default_factory=list)
@@ -76,6 +78,8 @@ def set_option(config: "Config", key: str, text: str) -> None:
         setattr(config, key, int(float(text)))
     elif key == "overlay_bottom_margin":
         config.overlay_bottom_margin = float(text)
+    elif key == "overlay_size":
+        config.overlay_size = max(OVERLAY_SIZE_MIN, min(OVERLAY_SIZE_MAX, int(text)))
     elif key == "hotkey" and valid_shortcut(text):
         config.hotkey = text
     else:
@@ -98,6 +102,7 @@ def load(path: Path | None = None) -> Config:
             setattr(config, key, value)
     if not valid_shortcut(config.hotkey):
         config.hotkey = "ctrl"
+    config.overlay_size = max(OVERLAY_SIZE_MIN, min(OVERLAY_SIZE_MAX, config.overlay_size))
     if config.dictation_mode not in ("local", "cloud"):
         config.dictation_mode = "local"
     config.hold_ms = max(100, min(int(config.hold_ms), 2000))

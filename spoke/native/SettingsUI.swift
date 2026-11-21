@@ -42,6 +42,7 @@ final class SettingsModel: ObservableObject {
     @Published var usageMessage = ""
     @Published var autostart: Bool { didSet { send("autostart", autostart) } }
     @Published var overlay: Bool { didSet { send("overlay", overlay) } }
+    @Published var overlaySize: Double { didSet { if overlaySize != oldValue { send("overlay_size", Int(overlaySize)) } } }
     @Published var overlayMargin: Double { didSet { if overlayMargin.rounded() != oldValue.rounded() { send("overlay_bottom_margin", Int(overlayMargin)) } } }
     @Published var sounds: Bool { didSet { send("sounds", sounds) } }
     @Published var checkUpdates: Bool { didSet { send("check_updates_on_start", checkUpdates) } }
@@ -49,6 +50,8 @@ final class SettingsModel: ObservableObject {
     @Published var inputMonitoring = ""
     @Published var microphone = ""
     @Published var updateStatus = ""
+    @Published var checkingUpdate = false
+    @Published fileprivate var selectedPane = Pane.general
 
     private var suppress = false
     private var monitor: Any?
@@ -64,6 +67,7 @@ final class SettingsModel: ObservableObject {
         dictationMode = json["dictation_mode"] as? String ?? "local"
         autostart = json["autostart"] as? Bool ?? true
         overlay = json["overlay"] as? Bool ?? true
+        overlaySize = json["overlay_size"] as? Double ?? 60
         overlayMargin = json["overlay_bottom_margin"] as? Double ?? 14
         sounds = json["sounds"] as? Bool ?? false
         checkUpdates = json["check_updates_on_start"] as? Bool ?? true
@@ -75,8 +79,10 @@ final class SettingsModel: ObservableObject {
         if let value = json["input_monitoring"] as? String, value != inputMonitoring { inputMonitoring = value }
         if let value = json["microphone"] as? String, value != microphone { microphone = value }
         if let value = json["update_status"] as? String, value != updateStatus { updateStatus = value }
+        if let value = json["checking_update"] as? Bool, value != checkingUpdate { checkingUpdate = value }
         if let value = json["autostart"] as? Bool, value != autostart { autostart = value }
         if let value = json["overlay"] as? Bool, value != overlay { overlay = value }
+        if let value = json["overlay_size"] as? Double, value != overlaySize { overlaySize = value }
         if let value = json["overlay_bottom_margin"] as? Double, value != overlayMargin { overlayMargin = value }
         if let value = json["sounds"] as? Bool, value != sounds { sounds = value }
         if let value = json["check_updates_on_start"] as? Bool, value != checkUpdates { checkUpdates = value }
@@ -157,30 +163,68 @@ final class SettingsModel: ObservableObject {
     }
 }
 
-private enum Pane: String {
+private enum Pane: String, CaseIterable {
     case general, recognition, usage, overlay, system
+
+    var tab: (title: String, symbol: String) {
+        switch self {
+        case .general: ("Основные", "gearshape")
+        case .recognition: ("Распознавание", "text.bubble")
+        case .usage: ("Расход API", "chart.bar")
+        case .overlay: ("Плашка и звук", "waveform")
+        case .system: ("Система", "lock.shield")
+        }
+    }
 }
 
 private struct SettingsPane: View {
     @ObservedObject var model: SettingsModel
-    let pane: Pane
     @State private var elevenlabsKey = ""
     @State private var anthropicKey = ""
     @State private var usagePeriod = "month"
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            switch pane {
-            case .general: general
-            case .recognition: recognition
-            case .usage: usage
-            case .overlay: overlay
-            case .system: system
+        let pane = model.selectedPane
+        VStack(spacing: 0) {
+            HStack(spacing: 4) {
+                ForEach(Pane.allCases, id: \.self) { page in
+                    let selected = page == pane
+                    Button {
+                        if !selected { model.act("pane_" + page.rawValue) }
+                    } label: {
+                        VStack(spacing: 4) {
+                            Image(systemName: page.tab.symbol).font(.system(size: 19))
+                            Text(page.tab.title).font(.caption)
+                        }
+                        .frame(maxWidth: .infinity, minHeight: 49)
+                        .contentShape(Rectangle())
+                        .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                        .background(selected ? Color.accentColor.opacity(0.13) : Color.clear, in: RoundedRectangle(cornerRadius: 9))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityAddTraits(selected ? .isSelected : [])
+                }
             }
+            .padding(.horizontal, 16)
+            .padding(.bottom, 10)
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("Разделы настроек")
+            Divider()
+            VStack(alignment: .leading, spacing: 14) {
+                switch pane {
+                case .general: general
+                case .recognition: recognition
+                case .usage: usage
+                case .overlay: overlay
+                case .system: system
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 24)
+            .padding(.vertical, 22)
         }
-        .padding(.horizontal, 34)
-        .padding(.vertical, 24)
         .frame(width: 536)
+        .transaction { $0.disablesAnimations = true }
     }
 
     private var general: some View {
@@ -221,7 +265,7 @@ private struct SettingsPane: View {
 
     private func keyRow(_ title: String, account: String, saved: Bool, key: Binding<String>) -> some View {
         HStack(spacing: 10) {
-            Text(title).frame(width: 110, alignment: .trailing)
+            Text(title).frame(width: 150, alignment: .leading)
             SecureField(saved ? "Ключ сохранён" : "Ключ API", text: key)
                 .accessibilityLabel("Ключ API " + title)
             Button("Сохранить") {
@@ -285,6 +329,19 @@ private struct SettingsPane: View {
     private var overlay: some View {
         Group {
             option("Показывать плашку записи", isOn: $model.overlay)
+            row("Размер капли") {
+                Slider(value: $model.overlaySize, in: 36...84, step: 4)
+                    .frame(width: 145).accessibilityLabel("Размер капли")
+                Text("\(Int(model.overlaySize)) пт").monospacedDigit().foregroundStyle(.secondary)
+            }
+            .disabled(!model.overlay)
+            row("Предпросмотр") {
+                Button("Голос") { model.act("preview_voice") }.buttonStyle(.bordered)
+                    .accessibilityLabel("Предпросмотр голоса")
+                Button("Загрузка") { model.act("preview_loading") }.buttonStyle(.bordered)
+                    .accessibilityLabel("Предпросмотр загрузки")
+            }
+            .disabled(!model.overlay)
             row("Высота над Dock") {
                 Slider(value: $model.overlayMargin, in: 0...80, step: 1).frame(width: 145).accessibilityLabel("Высота над Dock")
                 Text("\(Int(model.overlayMargin)) пт").monospacedDigit().foregroundStyle(.secondary).frame(width: 42, alignment: .trailing)
@@ -298,7 +355,7 @@ private struct SettingsPane: View {
 
     private var system: some View {
         Group {
-            Text("Разрешения").font(.headline).padding(.leading, 196)
+            Text("Разрешения").font(.headline)
             permission("Универсальный доступ", model.accessibility, "open_accessibility")
             permission("Мониторинг ввода", model.inputMonitoring, "open_input")
             permission("Микрофон", model.microphone, "open_microphone")
@@ -307,9 +364,14 @@ private struct SettingsPane: View {
             Divider()
             row("Версия") { Text(model.version).foregroundStyle(.secondary) }
             row("Обновления") {
-                Text(model.updateStatus).font(.callout).foregroundStyle(.secondary).lineLimit(1)
                 Button("Проверить…") { model.act("update") }.buttonStyle(.bordered)
+                    .disabled(model.checkingUpdate)
+                if model.checkingUpdate {
+                    ProgressView().controlSize(.small).accessibilityLabel("Проверка обновлений")
+                }
             }
+            Text(model.updateStatus).font(.callout).foregroundStyle(.secondary)
+                .lineLimit(2, reservesSpace: true)
             option("Проверять обновления при запуске", isOn: $model.checkUpdates)
             row("Журнал") { Button("Показать в Finder") { model.act("show_log") }.buttonStyle(.bordered) }
         }
@@ -317,18 +379,18 @@ private struct SettingsPane: View {
 
     private func row<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
         HStack(spacing: 10) {
-            Text(title).frame(width: 186, alignment: .trailing)
+            Text(title).frame(width: 150, alignment: .leading)
             HStack(content: content).frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
     private func option(_ title: String, isOn: Binding<Bool>) -> some View {
-        Toggle(title, isOn: isOn).toggleStyle(.checkbox).padding(.leading, 196)
+        Toggle(title, isOn: isOn).toggleStyle(.checkbox)
     }
 
     private func detail(_ title: String) -> some View {
         Text(title).font(.callout).foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true).padding(.leading, 196)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     private func permission(_ title: String, _ status: String, _ action: String) -> some View {
@@ -349,10 +411,16 @@ public final class SpokeSettingsBridge: NSObject {
         super.init()
     }
 
-    @objc public func pane(_ identifier: String) -> NSView {
-        let host = NSHostingView(rootView: SettingsPane(model: model, pane: Pane(rawValue: identifier) ?? .general))
+    @objc public func makeContentView() -> NSView {
+        let host = NSHostingView(rootView: SettingsPane(model: model))
         host.setFrameSize(host.fittingSize)
         return host
+    }
+
+    @objc public func selectPane(_ identifier: String) {
+        if let pane = Pane(rawValue: identifier), pane != model.selectedPane {
+            model.selectedPane = pane
+        }
     }
 
     @objc public func stopCapture() {

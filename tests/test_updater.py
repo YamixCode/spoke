@@ -2,6 +2,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import plistlib
 import zipfile
 from pathlib import Path
 
@@ -61,6 +62,24 @@ def test_release_without_code_archive_is_reported(monkeypatch):
     monkeypatch.setattr(updater, "fetch", lambda *a, **k: json.dumps({"tag_name": "v2.0.0", "assets": []}).encode())
     with pytest.raises(updater.UpdateError, match="нет архива"):
         updater.latest_release()
+
+
+def test_signed_distribution_requires_dmg_and_rejects_code_updates(tmp_path, monkeypatch):
+    resources = tmp_path / "Resources"
+    resources.mkdir()
+    (tmp_path / "Info.plist").write_bytes(plistlib.dumps({"SpokeSignedDistribution": True}))
+    monkeypatch.setenv("RESOURCEPATH", str(resources))
+    body = {"tag_name": "v99.0.0", "html_url": "https://example/release", "assets": []}
+    monkeypatch.setattr(updater, "fetch", lambda *args, **kwargs: json.dumps(body).encode())
+
+    with pytest.raises(updater.UpdateError, match="нет установочного DMG"):
+        updater.check()
+    body["assets"].append({"name": "Spoke-99.0.0.dmg", "url": "asset/dmg"})
+    update = updater.check()
+    assert update.page == "https://example/release"
+    with pytest.raises(updater.UpdateError, match="подписанной сборки"):
+        updater.apply(update, code_dir=tmp_path / "code")
+    assert not (tmp_path / "code").exists()
 
 
 def test_apply_installs_new_code_and_replaces_old_one(tmp_path, monkeypatch):

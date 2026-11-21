@@ -9,9 +9,8 @@ import subprocess
 import time
 
 import objc
-from AppKit import (NSApp, NSBackingStoreBuffered, NSImage, NSMakeRect, NSObject, NSToolbar, NSToolbarDisplayModeIconAndLabel,
-                    NSToolbarItem, NSView, NSWindow, NSWindowStyleMaskClosable, NSWindowStyleMaskTitled,
-                    NSWindowToolbarStylePreference)
+from AppKit import (NSApp, NSBackingStoreBuffered, NSMakeRect, NSObject, NSWindow,
+                    NSWindowStyleMaskClosable, NSWindowStyleMaskTitled)
 
 from spoke import __version__, autostart, config as cfg, permissions
 from spoke.apple_speech import available as apple_speech_available
@@ -20,34 +19,12 @@ from spoke.native_bridge import load_library
 from spoke.usage import key_fingerprint, usage_store
 
 LOG_PATH = os.path.expanduser("~/Library/Logs/Spoke.log")
-PANES = {"general": ("Основные", "gearshape"), "recognition": ("Распознавание", "text.bubble"),
-         "usage": ("Расход API", "chart.bar"),
-         "overlay": ("Плашка и звук", "waveform"), "system": ("Система", "lock.shield")}
+PANES = {"general": "Основные", "recognition": "Распознавание", "usage": "Расход API",
+         "overlay": "Плашка и звук", "system": "Система"}
 
 
 class _Controller(NSObject):
     owner = None
-
-    def selectPane_(self, sender):
-        self.owner.select(str(sender.itemIdentifier()))
-
-    def toolbarAllowedItemIdentifiers_(self, toolbar):
-        return list(PANES)
-
-    def toolbarDefaultItemIdentifiers_(self, toolbar):
-        return list(PANES)
-
-    def toolbarSelectableItemIdentifiers_(self, toolbar):
-        return list(PANES)
-
-    def toolbar_itemForItemIdentifier_willBeInsertedIntoToolbar_(self, toolbar, identifier, flag):
-        title, icon = PANES[identifier]
-        item = NSToolbarItem.alloc().initWithItemIdentifier_(identifier)
-        item.setLabel_(title)
-        item.setImage_(NSImage.imageWithSystemSymbolName_accessibilityDescription_(icon, title))
-        item.setTarget_(self)
-        item.setAction_("selectPane:")
-        return item
 
     def settingChanged_value_(self, key, value):
         self.owner.changed(str(key), str(value))
@@ -60,33 +37,30 @@ class _Controller(NSObject):
 
 
 class SettingsWindow:
-    def __init__(self, config: cfg.Config, engine, on_change=lambda key: None, on_update=lambda: ""):
+    def __init__(self, config: cfg.Config, engine, on_change=lambda key: None, on_update=lambda: None, on_preview=lambda mode: None):
         self.config, self.engine, self.on_change, self.on_update = config, engine, on_change, on_update
+        self.on_preview = on_preview
         self._usage_fingerprints = {}
         self._usage_refresh_at = 0.0
         load_library()
         self.controller = _Controller.alloc().init()
         self.controller.owner = self
         self.bridge = objc.lookUpClass("SpokeSettingsBridge").alloc().initWithConfig_delegate_(json.dumps(self._snapshot()), self.controller)
-        self.panes: dict[str, NSView] = {}
+        self.selected_pane = "general"
         self.window = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
             NSMakeRect(0, 0, 560, 300), NSWindowStyleMaskTitled | NSWindowStyleMaskClosable, NSBackingStoreBuffered, False)
         self.window.setReleasedWhenClosed_(False)
         self.window.setDelegate_(self.controller)
-        self.toolbar = NSToolbar.alloc().initWithIdentifier_("spoke.preferences")
-        self.toolbar.setDelegate_(self.controller)
-        self.toolbar.setAllowsUserCustomization_(False)
-        self.toolbar.setDisplayMode_(NSToolbarDisplayModeIconAndLabel)
         self.window.setTitlebarAppearsTransparent_(True)
-        self.window.setToolbar_(self.toolbar)
-        self.window.setToolbarStyle_(NSWindowToolbarStylePreference)
-        self.select("general", animate=False)
+        self.content = self.bridge.makeContentView()
+        self.window.setContentView_(self.content)
+        self.select("general")
         self.window.center()
 
     def _snapshot(self) -> dict:
         c = self.config
         return {"version": __version__, "hotkey_title": c.hotkey_title(), "autostart": c.autostart, "overlay": c.overlay,
-                "overlay_bottom_margin": c.overlay_bottom_margin, "sounds": c.sounds,
+                "overlay_bottom_margin": c.overlay_bottom_margin, "overlay_size": c.overlay_size, "sounds": c.sounds,
                 "check_updates_on_start": c.check_updates_on_start, "apple_available": apple_speech_available(),
                 "cleanup_status": self._cleanup_status(), "dictation_mode": c.dictation_mode}
 
@@ -103,7 +77,7 @@ class SettingsWindow:
         self.bridge.update_(json.dumps({**values, "cloud_message": message}))
 
     def refresh_usage(self, *, reload_keys: bool = False) -> None:
-        if not reload_keys and (self.toolbar.selectedItemIdentifier() != "usage" or time.monotonic() < self._usage_refresh_at):
+        if not reload_keys and (self.selected_pane != "usage" or time.monotonic() < self._usage_refresh_at):
             return
         self._usage_refresh_at = time.monotonic() + 2
         message = ""
@@ -117,25 +91,23 @@ class SettingsWindow:
             message = "Не удалось прочитать расход API."
         self.bridge.update_(json.dumps({"api_usage": both, "usage_message": message}))
 
-    def select(self, identifier: str, animate: bool = True) -> None:
+    def select(self, identifier: str) -> None:
         self.bridge.stopCapture()
         if identifier == "recognition":
             self._refresh_keys()
         elif identifier == "usage":
             self.refresh_usage(reload_keys=True)
-        self.toolbar.setSelectedItemIdentifier_(identifier)
-        self.window.setTitle_(PANES[identifier][0])
-        if identifier not in self.panes:
-            self.panes[identifier] = self.bridge.pane_(identifier)
-        pane = self.panes[identifier]
-        size = pane.fittingSize()
-        self.window.setContentView_(NSView.alloc().initWithFrame_(NSMakeRect(0, 0, size.width, size.height)))
+        self.selected_pane = identifier
+        self.window.setTitle_(PANES[identifier])
+        self.bridge.selectPane_(identifier)
+        self.content.layoutSubtreeIfNeeded()
+        size = self.content.fittingSize()
         frame = self.window.frameRectForContentRect_(NSMakeRect(0, 0, size.width, size.height))
-        top = self.window.frame().origin.y + self.window.frame().size.height
-        frame.origin.x, frame.origin.y = self.window.frame().origin.x, top - frame.size.height
-        self.window.setFrame_display_animate_(frame, True, animate and self.window.isVisible())
-        pane.setFrame_(NSMakeRect(0, 0, size.width, size.height))
-        self.window.setContentView_(pane)
+        current = self.window.frame()
+        frame.origin.x = current.origin.x
+        frame.origin.y = current.origin.y + current.size.height - frame.size.height
+        if frame != current:
+            self.window.setFrame_display_(frame, False)
 
     def refresh_permissions(self) -> None:
         def mark(granted: bool) -> str:
@@ -145,9 +117,9 @@ class SettingsWindow:
 
     def show(self) -> None:
         self.refresh_permissions()
-        if self.toolbar.selectedItemIdentifier() == "recognition":
+        if self.selected_pane == "recognition":
             self._refresh_keys()
-        elif self.toolbar.selectedItemIdentifier() == "usage":
+        elif self.selected_pane == "usage":
             self.refresh_usage(reload_keys=True)
         NSApp.activateIgnoringOtherApps_(True)
         self.window.makeKeyAndOrderFront_(None)
@@ -155,6 +127,9 @@ class SettingsWindow:
     @property
     def visible(self) -> bool:
         return bool(self.window.isVisible())
+
+    def update_status(self, message: str, checking: bool = False) -> None:
+        self.bridge.update_(json.dumps({"update_status": message, "checking_update": checking}))
 
     def changed(self, key: str, value: str) -> None:
         if key.startswith("api_key_") and (provider := key.removeprefix("api_key_")) in PROVIDERS:
@@ -194,7 +169,11 @@ class SettingsWindow:
         elif name in panes:
             subprocess.run(["open", panes[name]], check=False)
         elif name == "update":
-            self.bridge.update_(json.dumps({"update_status": self.on_update()}))
+            self.on_update()
+        elif name.startswith("pane_") and (identifier := name.removeprefix("pane_")) in PANES:
+            self.select(identifier)
+        elif name in ("preview_voice", "preview_loading"):
+            self.on_preview("record" if name == "preview_voice" else "work")
         elif name == "show_log":
             subprocess.run(["open", "-R", LOG_PATH], check=False)
         elif name.startswith("remove_key_") and (provider := name.removeprefix("remove_key_")) in PROVIDERS:

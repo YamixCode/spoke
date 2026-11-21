@@ -1,3 +1,5 @@
+import os
+import plistlib
 import sys
 from pathlib import Path
 
@@ -5,7 +7,12 @@ UPDATED_CODE = Path.home() / "Library" / "Application Support" / "Spoke" / "code
 
 
 def load_main():
-    if (UPDATED_CODE / "spoke" / "__init__.py").exists():
+    resources = os.environ.get("RESOURCEPATH")
+    signed_distribution = False
+    if resources:
+        plist = Path(resources).parent / "Info.plist"
+        signed_distribution = plist.is_file() and plistlib.loads(plist.read_bytes()).get("SpokeSignedDistribution", False)
+    if not signed_distribution and (UPDATED_CODE / "spoke" / "__init__.py").exists():
         sys.path.insert(0, str(UPDATED_CODE))
         try:
             import spoke.app
