@@ -4,6 +4,10 @@ import Foundation
 @available(macOS 14, *)
 
 enum OpalDrop {
+    enum FieldEffect: String {
+        case none, format, formatted
+    }
+
     struct VoiceFrame {
         let phase: CGFloat
         let shell: CGPath
@@ -27,6 +31,11 @@ enum OpalDrop {
                                              (0xFA9A8B, 0.15), (0xFFFFFF, 0)])
     private static let shadow = color(0x10131E, alpha: 0.27)
     private static let outlineColor = color(0xEFF9FF, alpha: 0.33)
+    private static let fieldSweep = gradient([(0xAE8CF9, 0), (0xC59AFC, 0.54), (0xFFF3FF, 0.88),
+                                              (0xCCAFF9, 0.37), (0xA989EB, 0)])
+    private static let confirmationGlow = fade(0x2CB686, alpha: 0.82)
+    private static let confirmationInk = color(0xF4FFF8)
+    private static let confirmationEdge = color(0x23574D, alpha: 0.62)
 
     static func color(_ hex: UInt32, alpha: CGFloat = 1) -> CGColor {
         CGColor(red: CGFloat((hex >> 16) & 255) / 255, green: CGFloat((hex >> 8) & 255) / 255,
@@ -41,7 +50,8 @@ enum OpalDrop {
         gradient([(hex, alpha), (hex, 0)])
     }
 
-    static func draw(_ context: CGContext, size: CGFloat, voice: VoiceFrame, loadingTime: CGFloat) {
+    static func draw(_ context: CGContext, size: CGFloat, voice: VoiceFrame, loadingTime: CGFloat,
+                     fieldEffect: FieldEffect, fieldTime: CGFloat, reduceMotion: Bool) {
         let radius = size * 0.36
         let turn = (voice.phase + loadingTime * 0.8) * 0.78
         let progress = min(1, loadingTime / 0.58)
@@ -83,16 +93,61 @@ enum OpalDrop {
         CGContextDrawConicGradient(context, rim, CGPoint(x: -0.08, y: 0.07), turn)
         context.restoreGState()
 
+        context.saveGState()
         clipStroke(context, waterline(turn: turn), width: 0.022)
         context.setAlpha(0.46 + 0.23 * blend)
         context.drawLinearGradient(meniscus, start: CGPoint(x: -1.15, y: 0), end: CGPoint(x: 1.15, y: 0),
                                    options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+        context.restoreGState()
+        drawFieldEffect(context, effect: fieldEffect, time: fieldTime, reduceMotion: reduceMotion)
         context.restoreGState()
 
         context.setStrokeColor(outlineColor)
         context.setLineWidth(0.013)
         context.addPath(shell)
         context.strokePath()
+    }
+
+    private static func drawFieldEffect(_ context: CGContext, effect: FieldEffect, time: CGFloat, reduceMotion: Bool) {
+        switch effect {
+        case .none:
+            break
+        case .format:
+            let phase = (time / 1.08).truncatingRemainder(dividingBy: 1)
+            let center = reduceMotion ? 0 : -1.65 + 3.3 * phase
+            context.drawLinearGradient(fieldSweep, start: CGPoint(x: -0.12, y: center - 0.43),
+                                       end: CGPoint(x: 0.12, y: center + 0.43), options: [])
+        case .formatted:
+            let progress = reduceMotion ? 1 : min(1, time / 0.26)
+            let fade = reduceMotion ? 1 : 1 - min(1, max(0, (time - 1.08) / 0.24))
+            let reveal = reduceMotion ? 1 : min(1, time / 0.18)
+            context.setAlpha(fade * reveal)
+            pool(context, confirmationGlow, at: CGPoint(x: 0, y: 0), radius: 1.04)
+
+            let start = CGPoint(x: -0.36, y: 0.02)
+            let joint = CGPoint(x: -0.10, y: 0.28)
+            let end = CGPoint(x: 0.40, y: -0.28)
+            let stroke = CGMutablePath()
+            stroke.move(to: start)
+            if progress < 0.34 {
+                stroke.addLine(to: interpolate(start, joint, amount: progress / 0.34))
+            } else {
+                stroke.addLine(to: joint)
+                stroke.addLine(to: interpolate(joint, end, amount: (progress - 0.34) / 0.66))
+            }
+            context.setStrokeColor(confirmationEdge)
+            context.setLineWidth(0.164)
+            context.addPath(stroke)
+            context.strokePath()
+            context.setStrokeColor(confirmationInk)
+            context.setLineWidth(0.108)
+            context.addPath(stroke)
+            context.strokePath()
+        }
+    }
+
+    private static func interpolate(_ start: CGPoint, _ end: CGPoint, amount: CGFloat) -> CGPoint {
+        CGPoint(x: start.x + (end.x - start.x) * amount, y: start.y + (end.y - start.y) * amount)
     }
 
     private static func outline(phase: CGFloat, level: CGFloat) -> CGPath {

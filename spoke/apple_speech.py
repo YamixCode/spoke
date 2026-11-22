@@ -8,7 +8,7 @@ import tempfile
 
 import numpy as np
 
-from spoke.native_bridge import call_json
+from spoke.native_bridge import call_json, call_json_cancellable
 from spoke.transcribe import SAMPLE_RATE
 
 
@@ -30,6 +30,9 @@ class AppleTranscriber:
             self.cleanup.prepare()
 
     def transcribe(self, audio: np.ndarray, vocabulary: tuple[str, ...] | list[str] = ()) -> str:
+        return self.transcribe_cancellable(audio, vocabulary, None)
+
+    def transcribe_cancellable(self, audio, vocabulary, cancelled):
         if not self._locale:
             self.warm_up()
         samples = (np.clip(audio, -1.0, 1.0) * 32767).astype("<i2")
@@ -44,7 +47,11 @@ class AppleTranscriber:
             file.write(header)
             file.write(samples.tobytes())
             file.flush()
-            text = self._call("spoke_apple_transcribe", os.fsencode(file.name), self._locale.encode(), json.dumps(vocabulary).encode())
+            arguments = (os.fsencode(file.name), self._locale.encode(), json.dumps(vocabulary).encode())
+            if cancelled is None:
+                text = self._call("spoke_apple_transcribe", *arguments)
+            else:
+                text = call_json_cancellable("spoke_apple_transcribe_cancellable", cancelled, *arguments)["text"]
         return self.cleanup.process(text) if self.cleanup is not None else text
 
     @staticmethod

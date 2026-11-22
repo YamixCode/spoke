@@ -6,6 +6,7 @@ import queue
 import threading
 import time
 from collections import deque
+from functools import partial
 from pathlib import Path
 
 import numpy as np
@@ -13,13 +14,14 @@ import numpy as np
 from spoke import inject, sounds
 from spoke.apple_speech import AppleTranscriber
 from spoke.cleanup import Cleanup
-from spoke.cloud import CloudKeys, CloudSession
+from spoke.cloud import CloudKeys, CloudSession, format_field
 from spoke.config import Config
 from spoke.history import HistoryStore
-from spoke.hotkey import HoldGate
+from spoke.hotkey import LOCKED, HoldGate
 from spoke.keys import KeyListener, Shortcut
 from spoke.recorder import Recorder
 from spoke.streaming import StreamSession
+from spoke.text_field import EditableField
 from spoke.transcribe import SAMPLE_RATE, is_silence
 
 logger = logging.getLogger("spoke")
@@ -33,8 +35,13 @@ class Engine:
         self.recovery_file = recovery_file
         self.recorder = recorder or Recorder(config.max_seconds, recovery_file)
         self.cleanup = Cleanup() if transcriber is None else None
+        if self.cleanup is not None:
+            self.cleanup.enabled = config.dictation_mode == "local"
         self.transcriber = transcriber if transcriber is not None else AppleTranscriber(self.cleanup)
-        self._state_lock = threading.Lock()
+        self._state_lock = threading.RLock()
+        self._wake = threading.Event()
+        self._recording_token = None
+        self.on_state_change = lambda: None
         self.state = LOADING
         self.last_text = ""
         self.history: deque[str] = deque(maxlen=max(1, config.history_size))
@@ -45,6 +52,8 @@ class Engine:
         self.last_error = ""
         self._session: StreamSession | CloudSession | None = None
         self.locked = False
+        self.formatting_field = False
+        self.field_formatted_at: float | None = None
         self.recording_since = 0.0
         self._last_paste_at: float | None = None
         self._jobs: queue.Queue = queue.Queue()
@@ -53,14 +62,34 @@ class Engine:
         self._listener = None
         threading.Thread(target=self._worker, daemon=True).start()
 
+    @property
+    def state(self):
+        return self._state
+
+    @state.setter
+    def state(self, value):
+        self._state = value
+        if value == IDLE and self.cleanup is not None and not self.cleanup.enabled:
+            self._jobs.put(self.cleanup.release_if_disabled)
+        self.on_state_change()
+
+    def reserve_update(self):
+        with self._state_lock:
+            if self.state != IDLE:
+                return False
+            self.state = LOADING
+            return True
+
     def _make_gate(self) -> HoldGate:
         target = "shortcut" if self.config.hotkey.startswith("key:") else self.config.hotkey
         on_lock = self._start_locked if target != "shortcut" or Shortcut.parse(self.config.hotkey).is_modifier else None
         return HoldGate(target, self.config.hold_ms, self._start, self._stop, self._cancel, on_lock=on_lock,
-                        double_tap_ms=self.config.double_tap_ms)
+                        double_tap_ms=self.config.double_tap_ms,
+                        on_reformat=self._start_field_formatting if on_lock else None)
 
     def reload_hotkey(self) -> None:
         self.gate = self._make_gate()
+        self._wake.set()
         if self._listener is not None:
             self.restart_listening()
 
@@ -75,7 +104,12 @@ class Engine:
 
     def _start_listener(self) -> None:
         shortcut = Shortcut.parse(self.config.hotkey) if self.config.hotkey.startswith("key:") else None
-        self._listener = KeyListener(lambda name: self.gate.key_down(name), lambda name: self.gate.key_up(name),
+        def dispatch(action, name):
+            try:
+                getattr(self.gate, action)(name)
+            finally:
+                self._wake.set()
+        self._listener = KeyListener(partial(dispatch, "key_down"), partial(dispatch, "key_up"),
                                      shortcut=shortcut, gate_state=lambda: self.gate.state,
                                      suspended=lambda: self.capturing_shortcut, on_suspend=self._make_fresh_gate)
         self._listener.start()
@@ -110,23 +144,40 @@ class Engine:
 
     def _recover(self) -> None:
         path = self.recovery_file
-        if not path or not path.exists():
+        if path:
+            candidates = [*path.parent.glob(path.stem + "-*" + path.suffix)]
+            if path.exists():
+                candidates.append(path)
+            for candidate in sorted(candidates, key=lambda item: item.stat().st_mtime):
+                self._recover_file(candidate)
+
+    def _recover_file(self, path):
+        if not path.exists():
             return
         try:
             audio = np.fromfile(path, dtype="<i2").astype(np.float32) / 32767
             if len(audio) >= self.config.min_seconds * SAMPLE_RATE and not is_silence(audio, self.config.silence_rms):
                 text = self._transcribe(audio)
-                if text:
-                    self._remember(text)
-                    self.notify("Spoke", f"Восстановлена несохранённая диктовка ({len(text)} символов): она в истории.")
+                if not text:
+                    return
+                self._remember(text)
+                self.notify("Spoke", f"Восстановлена несохранённая диктовка ({len(text)} символов): она в истории.")
             path.unlink(missing_ok=True)
         except Exception:
             logger.exception("Не удалось восстановить диктовку")
 
     def _ticker(self) -> None:
         while True:
+            self._wake.clear()
             self.gate.tick()
-            time.sleep(0.02)
+            self._wake.wait(self.gate.next_delay())
+
+    def _at_limit(self, token):
+        with self._state_lock:
+            if self._recording_token is token and self.state == RECORDING:
+                self.gate.release_lock()
+                self._stop()
+                self.notify("Spoke", "Достигнут предел длительности. Обрабатываю запись.")
 
     def _start(self) -> None:
         with self._state_lock:
@@ -142,6 +193,9 @@ class Engine:
                     sounds.play(sounds.ERROR, self.config.sounds)
                     return
             try:
+                self.recorder.max_seconds = self.config.locked_max_seconds if self.locked else self.config.max_seconds
+                token = self._recording_token = object()
+                self.recorder.on_limit = lambda: self._jobs.put(partial(self._at_limit, token))
                 self.recorder.start()
             except Exception as error:
                 self.last_error = f"микрофон недоступен: {error}"
@@ -150,11 +204,12 @@ class Engine:
                 sounds.play(sounds.ERROR, self.config.sounds)
                 return
             self.state = RECORDING
+            self.field_formatted_at = None
             self.recording_since = time.monotonic()
             sounds.play(sounds.START, self.config.sounds)
             if keys is not None:
                 self._session = CloudSession(keys, self.config.vocabulary, self.recorder.snapshot_from, self.notify).start()
-            elif self.config.streaming and hasattr(self.recorder, "snapshot"):
+            elif self.config.streaming and hasattr(self.recorder, "snapshot_from"):
                 c = self.config
                 self._session = StreamSession(self.recorder, self.transcriber, tuple(c.vocabulary), c.chunk_min_seconds,
                                               c.chunk_max_seconds, c.chunk_pause_seconds, c.silence_rms).start()
@@ -165,8 +220,8 @@ class Engine:
         if self.state != RECORDING:
             self.locked = False
             self.gate.release_lock()
-        else:
-            self.recorder.max_seconds = max(self.recorder.max_seconds, self.config.locked_max_seconds)
+        elif self.gate.state != LOCKED:
+            self._cancel()
 
     def finish_locked(self) -> None:
         if self.gate.release_lock():
@@ -177,31 +232,103 @@ class Engine:
             self._cancel()
 
     def _cancel(self) -> None:
+        with self._state_lock:
+            self._cancel_recording()
+
+    def _cancel_recording(self):
         if self.state == RECORDING:
             if self._session is not None:
                 self._session.cancel()
                 self._session = None
-            self.recorder.cancel()
-            self.locked = False
-            self.state = IDLE
+            try:
+                self.recorder.cancel()
+            finally:
+                self.locked = False
+                self.state = IDLE
 
     def _stop(self) -> None:
+        with self._state_lock:
+            self._stop_recording()
+
+    def _stop_recording(self):
         if self.state != RECORDING:
             return
-        audio = self.recorder.stop()
+        try:
+            audio = self.recorder.stop()
+        except Exception as error:
+            self.locked = False
+            if self._session:
+                self._session.cancel()
+                self._session = None
+            self.last_error = str(error)
+            self.state = IDLE
+            self.notify("Spoke", self.last_error)
+            return
         self.locked = False
         self.state = WORKING
         sounds.play(sounds.STOP, self.config.sounds)
         session, self._session = self._session, None
-        self._jobs.put((audio, session))
+        self._jobs.put(partial(self.process, audio, session))
+
+    def _start_field_formatting(self) -> None:
+        with self._state_lock:
+            if self.state != IDLE:
+                return
+            if self.config.dictation_mode != "cloud":
+                self.notify("Spoke", "Оформление поля через Haiku доступно в облачном режиме.")
+                return
+            self.last_error = ""
+            self.field_formatted_at = None
+            self.formatting_field = True
+            self.state = WORKING
+            self._jobs.put(self._format_focused_field)
+
+    def _format_focused_field(self) -> None:
+        field = None
+        started = time.monotonic()
+        try:
+            field = EditableField.capture()
+            captured = time.monotonic()
+            if len(field.text) > 20_000:
+                raise RuntimeError("Для одной правки выберите поле до 20 000 символов.")
+            edited = format_field(field.text, tuple(self.config.vocabulary))
+            formatted = time.monotonic()
+            if field.replace(edited):
+                self.field_formatted_at = time.monotonic()
+            logger.info("Оформление поля: чтение %.2f с, модель %.2f с, замена и проверка %.2f с",
+                        captured - started, formatted - captured, time.monotonic() - formatted)
+        except RuntimeError as error:
+            self.last_error = str(error)
+            logger.info("Оформление поля остановлено: %s", self.last_error)
+            self.notify("Spoke", self.last_error)
+        except Exception:
+            logger.warning("Не удалось оформить текст поля")
+            self.last_error = "Не удалось оформить текст поля. Исходный текст сохранён."
+            self.notify("Spoke", self.last_error)
+        finally:
+            if hasattr(field, "close"):
+                field.close()
+            self.formatting_field = False
+            self.state = IDLE
 
     def _worker(self) -> None:
         self._prepare_recognizer()
         self._recover()
         self.state = IDLE
         while True:
-            audio, session = self._jobs.get()
-            self.process(audio, session)
+            job = self._jobs.get()
+            try:
+                job()
+            except Exception:
+                logger.exception("Ошибка фоновой задачи Spoke")
+
+    def change_mode(self):
+        if self.cleanup is not None:
+            self.cleanup.enabled = self.config.dictation_mode == "local"
+            if self.cleanup.enabled:
+                self._jobs.put(self._prepare_recognizer)
+            elif self.state == IDLE:
+                self._jobs.put(self.cleanup.release_if_disabled)
 
     def _prepare_recognizer(self) -> None:
         if self._cloud_enabled:
@@ -261,7 +388,8 @@ class Engine:
             sounds.play(sounds.ERROR, self.config.sounds)
         else:
             self.last_text, self.last_seconds, self.last_error = text, time.monotonic() - started, ""
-            self._discard_journal()
+            if text or not used:
+                self._discard_journal()
             logger.info("записано %.1f с, обработано за %.1f с, символов %d", seconds, self.last_seconds, len(text))
         finally:
             if session is not None and not used:

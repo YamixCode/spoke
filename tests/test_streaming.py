@@ -41,8 +41,8 @@ class GrowingRecorder:
     def advance(self, seconds):
         self.upto = min(len(self.full), self.upto + int(seconds * SAMPLE_RATE))
 
-    def snapshot(self):
-        return self.full[: self.upto]
+    def snapshot_from(self, offset):
+        return self.full[offset:self.upto]
 
 
 class ScriptedTranscriber:
@@ -81,7 +81,7 @@ def test_short_dictation_without_pauses_is_a_single_transcription_and_engine_wir
     recorder.upto = len(full)
     pasted, transcriber = [], ScriptedTranscriber(["Привет, мир."])
     engine = Engine(cfg.Config(sounds=False), recorder=type("R", (), {"start": lambda s: None, "stop": lambda s: full, "cancel": lambda s: None,
-                                                                       "snapshot": lambda s: full})(),
+                                                                       "snapshot_from": lambda s, offset: full[offset:]})(),
                     transcriber=transcriber, paste=lambda t, r, sp: pasted.append(t))
     deadline = time.time() + 3
     while engine.state != IDLE and time.time() < deadline:

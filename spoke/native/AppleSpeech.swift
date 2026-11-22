@@ -16,10 +16,12 @@ private enum AppleSpeechError: LocalizedError {
     }
 }
 
-private func appleSpeechResult(_ operation: @escaping @Sendable () async throws -> String) -> UnsafeMutablePointer<CChar>? {
+public typealias SpokeCancelCheck = @convention(c) () -> Int32
+
+private func appleSpeechResult(timeout: Double = 90, cancelled: SpokeCancelCheck? = nil, _ operation: @escaping @Sendable () async throws -> String) -> UnsafeMutablePointer<CChar>? {
     let finished = DispatchSemaphore(value: 0)
     var response: [String: String] = [:]
-    Task.detached(priority: .userInitiated) {
+    let task = Task.detached(priority: .userInitiated) {
         defer { finished.signal() }
         do {
             response = ["text": try await operation()]
@@ -27,7 +29,13 @@ private func appleSpeechResult(_ operation: @escaping @Sendable () async throws 
             response = ["error": error.localizedDescription]
         }
     }
-    finished.wait()
+    let deadline = DispatchTime.now() + timeout
+    while finished.wait(timeout: cancelled == nil ? deadline : min(deadline, .now() + 0.1)) == .timedOut {
+        if cancelled?() == 1 || DispatchTime.now() >= deadline {
+            task.cancel()
+            return strdup(#"{"error":"Диктовка macOS остановлена или превысила время ожидания."}"#)
+        }
+    }
     guard let data = try? JSONSerialization.data(withJSONObject: response),
           let encoded = String(data: data, encoding: .utf8) else { return nil }
     return strdup(encoded)
@@ -61,18 +69,22 @@ private func recognizeAppleSpeech(path: String, locale: String, vocabulary: [Str
         context.contextualStrings = [.general: vocabulary]
         try await analyzer.setContext(context)
     }
-    async let transcript = collectAppleSpeech(transcriber)
-    do {
-        if let end = try await analyzer.analyzeSequence(from: audio) {
-            try await analyzer.finalizeAndFinish(through: end)
-        } else {
+    return try await withTaskCancellationHandler {
+        async let transcript = collectAppleSpeech(transcriber)
+        do {
+            if let end = try await analyzer.analyzeSequence(from: audio) {
+                try await analyzer.finalizeAndFinish(through: end)
+            } else {
+                await analyzer.cancelAndFinishNow()
+            }
+        } catch {
             await analyzer.cancelAndFinishNow()
+            throw error
         }
-    } catch {
-        await analyzer.cancelAndFinishNow()
-        throw error
+        return try await transcript
+    } onCancel: {
+        Task { await analyzer.cancelAndFinishNow() }
     }
-    return try await transcript
 }
 
 @available(macOS 26, *)
@@ -87,7 +99,7 @@ private func collectAppleSpeech(_ transcriber: DictationTranscriber) async throw
 
 @_cdecl("spoke_apple_prepare")
 public func spokeApplePrepare() -> UnsafeMutablePointer<CChar>? {
-    appleSpeechResult {
+    appleSpeechResult(timeout: 300) {
         guard #available(macOS 26, *) else { throw AppleSpeechError.unsupportedSystem }
         return try await prepareAppleSpeech()
     }
@@ -95,10 +107,15 @@ public func spokeApplePrepare() -> UnsafeMutablePointer<CChar>? {
 
 @_cdecl("spoke_apple_transcribe")
 public func spokeAppleTranscribe(_ path: UnsafePointer<CChar>, _ locale: UnsafePointer<CChar>, _ vocabulary: UnsafePointer<CChar>) -> UnsafeMutablePointer<CChar>? {
+    spokeAppleTranscribeCancellable(path, locale, vocabulary, nil)
+}
+
+@_cdecl("spoke_apple_transcribe_cancellable")
+public func spokeAppleTranscribeCancellable(_ path: UnsafePointer<CChar>, _ locale: UnsafePointer<CChar>, _ vocabulary: UnsafePointer<CChar>, _ cancelled: SpokeCancelCheck?) -> UnsafeMutablePointer<CChar>? {
     let filename = String(cString: path)
     let language = String(cString: locale)
     let terms = (try? JSONDecoder().decode([String].self, from: Data(String(cString: vocabulary).utf8))) ?? []
-    return appleSpeechResult {
+    return appleSpeechResult(cancelled: cancelled) {
         guard #available(macOS 26, *) else { throw AppleSpeechError.unsupportedSystem }
         return try await recognizeAppleSpeech(path: filename, locale: language, vocabulary: terms)
     }

@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import os
+import math
+import tempfile
 import threading
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -94,12 +96,21 @@ def load(path: Path | None = None) -> Config:
     for source in sources:
         try:
             raw = json.loads(source.read_text(encoding="utf-8"))
-            break
+            if isinstance(raw, dict):
+                break
+            raw = {}
         except (OSError, ValueError):
             continue
     for key, value in raw.items():
-        if hasattr(config, key) and isinstance(value, type(getattr(config, key))):
-            setattr(config, key, value)
+        default = vars(config).get(key)
+        if type(value) is not type(default) or default is None:
+            continue
+        if isinstance(default, list) and not all(isinstance(word, str) for word in value):
+            continue
+        if type(default) in (float, int) and ((type(value) is float and not math.isfinite(value)) or value < 0 or (default > 0 and value == 0)):
+            continue
+        setattr(config, key, value)
+    config.chunk_max_seconds = max(config.chunk_min_seconds, config.chunk_max_seconds)
     if not valid_shortcut(config.hotkey):
         config.hotkey = "ctrl"
     config.overlay_size = max(OVERLAY_SIZE_MIN, min(OVERLAY_SIZE_MAX, config.overlay_size))
@@ -113,5 +124,13 @@ def save(config: Config, path: Path | None = None) -> None:
     path = Path(path or CONFIG_PATH)
     with _SAVE_LOCK:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(asdict(config), ensure_ascii=False, indent=2), encoding="utf-8")
-        path.chmod(0o600)
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent, delete=False) as output:
+            staging = Path(output.name)
+            try:
+                json.dump(asdict(config), output, ensure_ascii=False, indent=2)
+                output.flush()
+                os.fsync(output.fileno())
+                output.close()
+                staging.replace(path)
+            finally:
+                staging.unlink(missing_ok=True)

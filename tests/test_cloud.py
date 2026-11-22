@@ -100,3 +100,26 @@ def test_usage_counts_cumulative_tokens_once_and_separates_keys(monkeypatch, iso
     assert isolated_usage.totals(active, this_month=True)["anthropic"] == {
         "seconds": 0, "input": 120, "output": 16, "usd": 0.000020, "configured": True,
     }
+
+
+def test_format_field_sends_the_cleaned_draft_once_and_accepts_a_rewrite(monkeypatch):
+    received = []
+    original = "Эээ, позвонить Ире в 15:30.\n\nПроверить 24 заявки."
+    rewritten = "Свяжись с Ирой к 16:30. Проверку всех заявок перенеси на завтра."
+    monkeypatch.setattr(cloud, "keychain_read", lambda provider: "configured" if provider == "anthropic" else "")
+
+    def format_text(raw, key, vocabulary, *, prompt):
+        received.append((raw, key, vocabulary))
+        assert "Свободно перефразируй" in prompt
+        return rewritten
+
+    monkeypatch.setattr(cloud, "_format_text", format_text)
+    assert cloud.format_field(original, ("Ира",)) == rewritten
+    assert received == [("позвонить Ире в 15:30.\n\nПроверить 24 заявки.", "configured", ("Ира",))]
+
+
+def test_format_field_rejects_a_blank_model_response(monkeypatch):
+    monkeypatch.setattr(cloud, "keychain_read", lambda _provider: "configured")
+    monkeypatch.setattr(cloud, "_format_text", lambda *args, **kwargs: " \n ")
+    with pytest.raises(RuntimeError, match="пустой ответ"):
+        cloud.format_field("Позвонить Ире в 15:30.", ())

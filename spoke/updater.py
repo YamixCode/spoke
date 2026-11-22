@@ -10,6 +10,7 @@ import re
 import shutil
 import ssl
 import subprocess
+import tempfile
 import urllib.error
 import urllib.request
 import zipfile
@@ -169,28 +170,40 @@ def _validate(package: Path, release: Release, shell_api: int | None) -> None:
         raise UpdateError(f"Версии {release.version} нужна новая сборка приложения: скачайте DMG на {release.page}")
 
 
-def apply(release: Release, token: str = "", code_dir: Path = CODE_DIR, shell_api: int | None = None) -> None:
+def prepare(release: Release, token: str = "", code_dir: Path = CODE_DIR, shell_api: int | None = None) -> Path:
     if uses_signed_distribution():
         raise UpdateError("Для подписанной сборки установите DMG со страницы релиза.")
     archive = fetch(release.code_url, token, "application/octet-stream")
     expected = fetch(release.checksum_url, token, "application/octet-stream").decode().split()[0].lower()
     if hashlib.sha256(archive).hexdigest() != expected:
         raise UpdateError("Контрольная сумма архива не совпала, обновление отменено")
-    staging = code_dir.with_name(code_dir.name + ".new")
-    previous = code_dir.with_name(code_dir.name + ".old")
-    shutil.rmtree(staging, ignore_errors=True)
-    staging.mkdir(parents=True)
+    code_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging = Path(tempfile.mkdtemp(dir=code_dir.parent, prefix=code_dir.name + ".new-"))
     try:
         _extract(archive, staging)
         _validate(staging / "spoke", release, shell_api if shell_api is not None else installed_shell_api())
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)
         raise
-    shutil.rmtree(previous, ignore_errors=True)
+    return staging
+
+
+def activate(staging: Path, code_dir: Path = CODE_DIR):
+    previous = code_dir.with_name(code_dir.name + ".old")
     if code_dir.exists():
+        shutil.rmtree(previous, ignore_errors=True)
         code_dir.rename(previous)
-    staging.rename(code_dir)
-    shutil.rmtree(previous, ignore_errors=True)
+    try:
+        staging.rename(code_dir)
+    except OSError:
+        if previous.exists() and not code_dir.exists():
+            previous.rename(code_dir)
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+
+def apply(release: Release, token: str = "", code_dir: Path = CODE_DIR, shell_api: int | None = None) -> None:
+    activate(prepare(release, token, code_dir, shell_api), code_dir)
 
 
 def reset(code_dir: Path = CODE_DIR) -> None:

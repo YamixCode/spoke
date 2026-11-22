@@ -27,4 +27,5 @@ OPTIONS = {
     },
 }
 
-setup(app=["spoke_main.py"], name="Spoke", options={"py2app": OPTIONS}, setup_requires=["py2app"])
+setup(app=["spoke_main.py"], name="Spoke", data_files=[("terminal", ["spoke/terminal.zsh", "spoke/terminal_editor.py"])],
+      options={"py2app": OPTIONS}, setup_requires=["py2app"])

@@ -20,6 +20,7 @@ SPACE_SETTLE_INTERVAL = 0.075
 SPACE_CHECK_INTERVAL = 0.15
 DESKTOP_SPACE, FULLSCREEN_SPACE = 0, 4
 RECORD, WORK = "record", "work"
+FIELD_FORMAT, FIELD_FORMATTED = "format", "formatted"
 
 
 class _PillView(NSView):
@@ -142,21 +143,31 @@ class Overlay:
             has_dock_inset = visible.origin.y > frame.origin.y or visible.size.width < frame.size.width
             self._base = visible if has_dock_inset and self._desktop_dock_visible(screen) else frame
 
+    def close(self) -> None:
+        if self._space_observer is not None:
+            NSWorkspace.sharedWorkspace().notificationCenter().removeObserver_(self._space_observer)
+            self._space_observer = None
+        self._reveal_after = 0.0
+        self._space = None
+        self._next_space_check = 0.0
+        self.motion.stopMotion()
+        self._close_panel()
+
     def update(self, mode: str | None, level: float = 0.0, locked: bool = False) -> None:
         if mode is None:
+            if self.panel is not None:
+                self.panel.setIgnoresMouseEvents_(True)
+                self.motion.setPresented_(False)
+                if not self.motion.isPresentationHidden():
+                    return
             if self._space_observer is not None:
-                NSWorkspace.sharedWorkspace().notificationCenter().removeObserver_(self._space_observer)
-                self._space_observer = None
-                self._reveal_after = 0.0
-                self._space = None
-                self._next_space_check = 0.0
-                self.motion.stopMotion()
-                self._close_panel()
+                self.close()
             return
 
-        processing = mode == WORK
+        processing = mode != RECORD
         clickable = mode == RECORD and locked
         self.motion.updateVoice_processing_locked_(level, processing, clickable)
+        self.motion.setFieldEffect_(mode)
         if self._space_observer is None:
             center = NSWorkspace.sharedWorkspace().notificationCenter()
             self._space_observer = center.addObserverForName_object_queue_usingBlock_(
@@ -181,6 +192,7 @@ class Overlay:
             self.motion.setFrame_(content)
         if self.panel.ignoresMouseEvents() == clickable:
             self.panel.setIgnoresMouseEvents_(not clickable)
+        self.motion.setPresented_(True)
         if opening:
             self.panel.orderFrontRegardless()
             self.motion.startMotion()

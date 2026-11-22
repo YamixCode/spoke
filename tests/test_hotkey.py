@@ -136,3 +136,40 @@ def test_on_press_fires_when_target_goes_down_only_once_per_press():
     g.key_down("ctrl")
     g.key_down("char")
     assert pressed == [1]
+
+
+def test_triple_tap_formats_on_release_without_starting_recording():
+    g, clock, events = locked_gate()
+    g.on_reformat = lambda: events.append("format")
+    tap(g, clock, 0.0)
+    tap(g, clock, 0.21)
+    assert events == []
+    tap(g, clock, 0.45)
+    clock.now = 1
+    g.tick()
+    assert events == ["format"] and g.state == "idle"
+
+
+def test_double_tap_starts_locked_recording_after_waiting_for_third():
+    g, clock, events = locked_gate()
+    g.on_reformat = lambda: events.append("format")
+    tap(g, clock, 0.0)
+    tap(g, clock, 0.2)
+    clock.now = 0.56
+    g.tick()
+    assert events == ["lock"] and g.state == "locked"
+    tap(g, clock, 0.8)
+    assert events == ["lock", "stop"]
+
+
+def test_holding_third_press_starts_dictation_instead_of_formatting():
+    g, clock, events = locked_gate()
+    g.on_reformat = lambda: events.append("format")
+    tap(g, clock, 0.0)
+    tap(g, clock, 0.15)
+    clock.now = 0.3
+    g.key_down("ctrl")
+    clock.now = 0.57
+    g.tick()
+    g.key_up("ctrl")
+    assert events == ["start", "stop"]

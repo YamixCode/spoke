@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import queue
+import tempfile
 import threading
 from bisect import bisect_right
 from pathlib import Path
@@ -16,6 +17,8 @@ class Recorder:
     def __init__(self, max_seconds: int = 180, journal: Path | None = None):
         self.max_seconds = max_seconds
         self.journal = journal
+        self._active_journal = None
+        self.on_limit = None
         self._journal_queue: queue.Queue | None = None
         self._journal_writer: threading.Thread | None = None
         self._chunks: list[tuple[int, np.ndarray]] = []
@@ -34,6 +37,7 @@ class Recorder:
                 return
             self._chunks = []
             self._open_journal()
+            on_limit = self.on_limit
 
             def callback(indata, frames, time_info, status):           # noqa: ARG001
                 self.level = float(np.sqrt(np.mean(np.square(indata[:, 0]))))
@@ -44,8 +48,21 @@ class Recorder:
                     self._chunks.append((offset + len(chunk), chunk))
                     if self._journal_queue is not None:
                         self._journal_queue.put(chunk)
-            self._stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32", callback=callback)
-            self._stream.start()
+                    if remaining <= frames and on_limit:
+                        on_limit()
+            try:
+                self._stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype="float32", callback=callback)
+                self._stream.start()
+            except BaseException:
+                try:
+                    if self._stream is not None:
+                        self._stream.close()
+                finally:
+                    self._stream = None
+                    self._close_journal()
+                    if not self._chunks:
+                        self.discard_journal()
+                raise
 
     def snapshot(self) -> np.ndarray:
         return self.snapshot_from(0)
@@ -63,11 +80,15 @@ class Recorder:
         """Останавливает запись и возвращает звук (пустой массив, если не писали)."""
         with self._lock:
             stream, self._stream = self._stream, None
-        if stream is not None:
-            stream.stop()
-            stream.close()
-        self.level = 0.0
-        self._close_journal()
+        try:
+            if stream is not None:
+                try:
+                    stream.stop()
+                finally:
+                    stream.close()
+        finally:
+            self.level = 0.0
+            self._close_journal()
         chunks, self._chunks = self._chunks, []
         return np.concatenate([data for _, data in chunks]) if chunks else np.zeros(0, dtype=np.float32)
 
@@ -76,14 +97,21 @@ class Recorder:
         self.discard_journal()
 
     def discard_journal(self) -> None:
-        if self.journal is not None:
-            self.journal.unlink(missing_ok=True)
+        if self._active_journal is not None:
+            self._active_journal.unlink(missing_ok=True)
+            self._active_journal = None
 
     def _open_journal(self) -> None:
         if self.journal is None:
             return
         self.journal.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        handle = os.fdopen(os.open(self.journal, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "wb")
+        try:
+            fd = os.open(self.journal, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            self._active_journal = self.journal
+        except FileExistsError:
+            fd, name = tempfile.mkstemp(dir=self.journal.parent, prefix=self.journal.stem + "-", suffix=self.journal.suffix)
+            self._active_journal = Path(name)
+        handle = os.fdopen(fd, "wb")
         pending: queue.Queue = queue.Queue()
         self._journal_queue = pending
 

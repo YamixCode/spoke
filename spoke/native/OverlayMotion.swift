@@ -4,7 +4,22 @@ import QuartzCore
 @available(macOS 14, *)
 @objc(SpokeSpeechMotionView)
 public final class SpokeSpeechMotionView: NSView {
+    private struct Presentation {
+        var from: CGFloat = 0
+        var to: CGFloat = 0
+        var started: CFTimeInterval = 0
+        var duration: CFTimeInterval = 0
+
+        func opacity(at now: CFTimeInterval) -> CGFloat {
+            guard duration > 0 else { return to }
+            let t = min(1, max(0, (now - started) / duration))
+            let eased = t * t * (3 - 2 * t)
+            return from + (to - from) * eased
+        }
+    }
+
     private var clock: CADisplayLink?
+    private var presentation = Presentation()
     private var hasMotionState = false
     private var lastFrame: CFTimeInterval = 0
     private var phase: CGFloat = 0
@@ -12,6 +27,8 @@ public final class SpokeSpeechMotionView: NSView {
     private var envelope: CGFloat = 0
     private var lastVoiceFrame = OpalDrop.VoiceFrame(phase: 0, level: 0)
     private var loadingTime: CGFloat = 0
+    private var fieldTime: CGFloat = 0
+    private var fieldEffect: OpalDrop.FieldEffect = .none
     private var processing = false
     private var locked = false
     private var reduceMotion = false
@@ -29,6 +46,28 @@ public final class SpokeSpeechMotionView: NSView {
             self.locked = locked
             needsDisplay = true
         }
+    }
+
+    @objc public func setFieldEffect(_ name: String) {
+        let next = OpalDrop.FieldEffect(rawValue: name) ?? .none
+        guard fieldEffect != next else { return }
+        fieldEffect = next
+        fieldTime = 0
+        needsDisplay = true
+    }
+
+    @objc public func setPresented(_ shown: Bool) {
+        let target: CGFloat = shown ? 1 : 0
+        guard presentation.to != target else { return }
+        let now = CACurrentMediaTime()
+        let from = presentation.opacity(at: now)
+        let duration = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : (shown ? 0.20 : 0.16)
+        presentation = Presentation(from: from, to: target, started: now, duration: duration)
+        needsDisplay = true
+    }
+
+    @objc public func isPresentationHidden() -> Bool {
+        return presentation.to == 0 && presentation.opacity(at: CACurrentMediaTime()) <= 0
     }
 
     public override func hitTest(_ point: NSPoint) -> NSView? { nil }
@@ -55,6 +94,9 @@ public final class SpokeSpeechMotionView: NSView {
         clock?.invalidate()
         clock = nil
         hasMotionState = false
+        presentation = Presentation()
+        fieldEffect = .none
+        fieldTime = 0
         target = 0
         envelope = 0
         phase = 0
@@ -75,6 +117,7 @@ public final class SpokeSpeechMotionView: NSView {
         let interval = target > envelope ? 0.045 : 0.15
         let next = envelope + (target - envelope) * (1 - exp(-elapsed / interval))
         if !reduceMotion {
+            if fieldEffect != .none { fieldTime += elapsed }
             if processing {
                 loadingTime += elapsed
             } else {
@@ -89,17 +132,27 @@ public final class SpokeSpeechMotionView: NSView {
 
     public override func draw(_ dirtyRect: NSRect) {
         guard let context = NSGraphicsContext.current?.cgContext else { return }
+        let opacity = presentation.opacity(at: CACurrentMediaTime())
+        guard opacity > 0 else { return }
         context.saveGState()
         defer { context.restoreGState() }
         context.translateBy(x: bounds.midX, y: bounds.midY)
+        if opacity < 1 {
+            let scale = 0.89 + 0.11 * opacity
+            context.scaleBy(x: scale, y: scale)
+            context.setAlpha(opacity)
+            context.beginTransparencyLayer(auxiliaryInfo: nil)
+        }
         context.setLineCap(.round)
         context.setLineJoin(.round)
         if !processing {
             lastVoiceFrame = OpalDrop.VoiceFrame(phase: phase, level: envelope)
         }
         OpalDrop.draw(context, size: bounds.height, voice: lastVoiceFrame,
-                       loadingTime: processing ? loadingTime : 0)
+                      loadingTime: processing ? loadingTime : 0,
+                      fieldEffect: fieldEffect, fieldTime: fieldTime, reduceMotion: reduceMotion)
         if locked { drawControls(context) }
+        if opacity < 1 { context.endTransparencyLayer() }
     }
 
     private func drawControls(_ context: CGContext) {

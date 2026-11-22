@@ -1,4 +1,5 @@
 import json
+import threading
 import time
 
 import pytest
@@ -6,6 +7,7 @@ import pytest
 import numpy as np
 
 from spoke import config as cfg
+from spoke import engine as engine_module
 from spoke.engine import IDLE, RECORDING, Engine
 from spoke.transcribe import SAMPLE_RATE, is_silence
 
@@ -79,6 +81,34 @@ def test_start_stop_cancel_flow_through_the_recorder():
     assert engine.state == IDLE and engine.recorder.cancelled == 1
     engine._stop()
     assert engine.state == IDLE
+
+
+def test_field_formatting_replaces_text_without_recording_or_history(monkeypatch):
+    engine, pasted = make(None, config=cfg.Config(dictation_mode="cloud"))
+    formatted = threading.Event()
+    results = []
+
+    class Target:
+        text = "первая мысль вторая мысль"
+
+        def replace(self, text):
+            results.append(text)
+            formatted.set()
+            return True
+
+    monkeypatch.setattr(engine_module.EditableField, "capture", lambda: Target())
+    monkeypatch.setattr(engine_module, "format_field", lambda text, vocabulary: "Первая мысль.\n\nВторая мысль.")
+    deadline = time.monotonic() + 1
+    while engine.state != IDLE and time.monotonic() < deadline:
+        time.sleep(0.01)
+    engine._start_field_formatting()
+    assert formatted.wait(1)
+    deadline = time.monotonic() + 1
+    while engine.state != IDLE and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert results == ["Первая мысль.\n\nВторая мысль."]
+    assert engine.field_formatted_at is not None
+    assert engine.recorder.started == 0 and not pasted and not engine.history
 
 
 def test_filters_and_config(tmp_path):

@@ -10,17 +10,19 @@ from pathlib import Path
 from queue import Empty, SimpleQueue
 
 import rumps
+from PyObjCTools import AppHelper
 from AppKit import NSApp, NSImage, NSWorkspace
-from Foundation import NSActivityLatencyCritical, NSActivityUserInitiatedAllowingIdleSystemSleep, NSProcessInfo, NSURL
+from Foundation import NSActivityUserInitiatedAllowingIdleSystemSleep, NSProcessInfo, NSURL
 
 from spoke import __version__, autostart, config as cfg, inject, permissions, updater
 from spoke.settings import SettingsWindow
-from spoke.overlay import RECORD, WORK, Overlay
+from spoke.overlay import FIELD_FORMAT, FIELD_FORMATTED, RECORD, WORK, Overlay
 from spoke.engine import IDLE, LOADING, RECORDING, WORKING, Engine
 
 ASSETS = Path(__file__).resolve().parent / "assets"
 ICONS = {LOADING: ("menu_loading.png", True), IDLE: ("menu_idle.png", True), RECORDING: ("menu_recording.png", False), WORKING: ("menu_working.png", True)}
 ICON_POINTS = 22.0
+FIELD_CONFIRMATION_SECONDS = 1.35
 STATUS = {LOADING: "Загружаю модель…", IDLE: "Готов: зажмите клавишу и говорите", RECORDING: "Слушаю…", WORKING: "Распознаю…"}
 
 
@@ -46,12 +48,15 @@ class SpokeApp(rumps.App):
         self.menu = [self.status_item, None, self.paste_last_item, self.copy_last_item, self.history_menu, None,
                      rumps.MenuItem("Настройки…", callback=self._open_settings, key=","), self.update_item, None,
                      rumps.MenuItem("Выйти", callback=rumps.quit_application)]
-        self._timer = rumps.Timer(self._refresh, 0.25)
+        self._timer = rumps.Timer(self._refresh, 1.0)
         self._timer.start()
         self.overlay = None
         self.apply_overlay()
         self._overlay_timer = rumps.Timer(self._animate, 0.025)
-        self._overlay_timer.start()
+        self._activity = None
+        self._last_permissions = 0.0
+        self._pending_update = None
+        self.engine.on_state_change = lambda: AppHelper.callAfter(self._sync_animation)
         self._permissions_ok = permissions.all_granted()
         if not self._permissions_ok:
             permissions.accessibility_granted(prompt=True)
@@ -112,9 +117,29 @@ class SpokeApp(rumps.App):
             return
         if not rumps.alert(title=f"Доступно обновление {release.version}", message=notes, ok="Обновить", cancel="Позже"):
             return
+        self._update_status("Скачиваю обновление…", checking=True)
+        threading.Thread(target=self._prepare_update, args=(release,), daemon=True).start()
+
+    def _prepare_update(self, release):
         try:
-            updater.apply(release, self.config.token())
-        except updater.UpdateError as error:
+            staged = updater.prepare(release, self.config.token())
+        except Exception as error:
+            AppHelper.callAfter(self._show_update_result, None, str(error))
+        else:
+            AppHelper.callAfter(self._queue_install, staged)
+
+    def _queue_install(self, staged):
+        self._pending_update = staged
+        self._install_when_idle()
+
+    def _install_when_idle(self):
+        if self._pending_update is None or not self.engine.reserve_update():
+            return
+        staged, self._pending_update = self._pending_update, None
+        try:
+            updater.activate(staged)
+        except Exception as error:
+            self.engine.state = IDLE
             self._update_status(str(error))
             rumps.alert(title="Не удалось установить обновление", message=str(error), ok="ОК")
             return
@@ -122,6 +147,7 @@ class SpokeApp(rumps.App):
             rumps.notification("Spoke", "Обновление установлено", "Перезапускаюсь…")
             rumps.quit_application()
             return
+        self.engine.state = IDLE
         self._update_status("Обновление установлено. Перезапустите Spoke.")
         rumps.alert(title="Обновление установлено", message="Перезапустите Spoke.", ok="ОК")
 
@@ -137,6 +163,8 @@ class SpokeApp(rumps.App):
         self.settings.show()
 
     def _settings_changed(self, key: str) -> None:
+        if key == "dictation_mode":
+            self.engine.change_mode()
         if key in ("overlay", "overlay_bottom_margin", "overlay_size"):
             self.apply_overlay()
 
@@ -144,12 +172,13 @@ class SpokeApp(rumps.App):
         if self.overlay is not None and self.engine.state == IDLE:
             self._preview_mode = mode
             self._preview_started = time.monotonic()
+            self._sync_animation()
 
     def apply_overlay(self) -> None:
         if self.config.overlay and self.overlay is None:
             self.overlay = Overlay(self.config.overlay_bottom_margin, self.engine.cancel_locked, self.engine.finish_locked)
         elif not self.config.overlay and self.overlay is not None:
-            self.overlay.update(None)
+            self.overlay.close()
             self.overlay = None
         if self.overlay is not None:
             self.overlay.set_bottom_margin(self.config.overlay_bottom_margin)
@@ -172,17 +201,39 @@ class SpokeApp(rumps.App):
         self._nsapp.nsstatusitem.setTitle_(None)
         self._shown_icon = state
 
+    def _sync_animation(self):
+        active = self.engine.state in (RECORDING, WORKING)
+        if active and self._activity is None:
+            self._activity = NSProcessInfo.processInfo().beginActivityWithOptions_reason_(
+                NSActivityUserInitiatedAllowingIdleSystemSleep, "Spoke: обработка диктовки")
+        elif not active and self._activity is not None:
+            NSProcessInfo.processInfo().endActivity_(self._activity)
+            self._activity = None
+        if self.overlay is not None:
+            self._overlay_timer.start()
+            self._animate(None)
+
     def _animate(self, _) -> None:
         if self.overlay is None:
+            self._overlay_timer.stop()
             return
         state = self.engine.state
         if state == RECORDING:
             self._preview_started = 0.0
             self.overlay.update(RECORD, getattr(self.engine.recorder, "level", 0.0), self.engine.locked)
         elif state == WORKING:
-            self.overlay.update(WORK)
+            if self.engine.formatting_field:
+                self._preview_started = 0.0
+                self.overlay.update(FIELD_FORMAT)
+            else:
+                self.overlay.update(WORK)
         else:
-            elapsed = time.monotonic() - self._preview_started
+            now = time.monotonic()
+            formatted_at = self.engine.field_formatted_at
+            if formatted_at is not None and now - formatted_at < FIELD_CONFIRMATION_SECONDS:
+                self.overlay.update(FIELD_FORMATTED)
+                return
+            elapsed = now - self._preview_started
             if elapsed < 4.6:
                 if self._preview_mode == WORK:
                     self.overlay.update(WORK)
@@ -192,6 +243,8 @@ class SpokeApp(rumps.App):
                     self.overlay.update(RECORD, 0.002 + 0.065 * phrase * syllable)
             else:
                 self.overlay.update(None)
+                if self.overlay.panel is None:
+                    self._overlay_timer.stop()
 
     def _refresh(self, _) -> None:
         try:
@@ -202,9 +255,15 @@ class SpokeApp(rumps.App):
             self._show_update_result(*update_result)
         state = self.engine.state
         self._show_icon(state)
-        self._check_permissions()
+        self._install_when_idle()
+        refresh_details = time.monotonic() - self._last_permissions >= 3
+        if refresh_details:
+            self._last_permissions = time.monotonic()
+            self._check_permissions()
         if state == RECORDING and self.engine.locked:
             self.status_item.title = f"Постоянная запись: {self.config.hotkey_title()} — завершить, Esc — отмена"
+        elif state == WORKING and self.engine.formatting_field:
+            self.status_item.title = "Оформляю текст поля…"
         else:
             self.status_item.title = STATUS.get(state, "")
         if not self._permissions_ok:
@@ -217,7 +276,7 @@ class SpokeApp(rumps.App):
             self.status_item.set_callback(None)
         self.update_item.title = f"Обновить до {self._available.version}…" if self._available else "Проверить обновления…"
         self._refresh_history()
-        if self.settings is not None and self.settings.visible:
+        if refresh_details and self.settings is not None and self.settings.visible:
             self.settings.refresh_permissions()
             self.settings.refresh_usage()
 
@@ -255,14 +314,14 @@ class SpokeApp(rumps.App):
             self.engine.paste_from_history(index)
         return handler
 
-_ACTIVITY = None
-
-
 def run() -> None:
-    global _ACTIVITY
-    _ACTIVITY = NSProcessInfo.processInfo().beginActivityWithOptions_reason_(
-        NSActivityUserInitiatedAllowingIdleSystemSleep | NSActivityLatencyCritical, "Spoke: мгновенная диктовка без App Nap")
     logging.basicConfig(filename=os.path.expanduser("~/Library/Logs/Spoke.log"), level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    if (Path.home() / ".config/spoke/terminal/init.zsh").is_file():
+        try:
+            from spoke.terminal import install_integration
+            install_integration()
+        except OSError:
+            logging.getLogger("spoke").exception("Не удалось обновить интеграцию cmux")
     config = cfg.load()
     config.apply_app_defaults()
     if not cfg.CONFIG_PATH.exists():
