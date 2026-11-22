@@ -90,7 +90,7 @@ def test_apply_installs_new_code_and_replaces_old_one(tmp_path, monkeypatch):
     serve(monkeypatch, good("1.2.0"))
     updater.apply(release("1.2.0"), code_dir=code, shell_api=1)
     assert "1.2.0" in (code / "spoke" / "__init__.py").read_text()
-    assert not (tmp_path / "code.new").exists() and not (tmp_path / "code.old").exists()
+    assert not (tmp_path / "code.new").exists() and "1.1.0" in (tmp_path / "code.old/spoke/__init__.py").read_text()
 
 
 @pytest.mark.parametrize("data,checksum,message", [

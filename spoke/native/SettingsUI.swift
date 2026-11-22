@@ -237,6 +237,9 @@ private struct SettingsPane: View {
                 .accessibilityLabel(model.capturing ? "Отменить выбор клавиши" : "Клавиша диктовки: \(model.hotkeyTitle). Изменить")
             }
             detail(model.capturing ? "Нажмите и отпустите клавишу или сочетание." : "Нажмите, чтобы назначить клавишу или сочетание.")
+            if model.dictationMode == "cloud" {
+                detail("Три быстрых нажатия клавиши-модификатора оформляют весь текст активного поля через Claude Haiku.")
+            }
             Divider()
             option("Запускать при входе в систему", isOn: $model.autostart)
         }

@@ -128,9 +128,10 @@ class Cleanup:
         self._encoding = None
         self._preparing = threading.Lock()
         self._retry_at = 0.0
+        self.enabled = True
 
     def prepare(self, *, wait: bool = False) -> None:
-        if self._encoding is not None or time.monotonic() < self._retry_at:
+        if not self.enabled or self._encoding is not None or time.monotonic() < self._retry_at:
             return
         if self._preparing.acquire(blocking=False):
             if wait:
@@ -157,6 +158,13 @@ class Cleanup:
             logger.exception("Не удалось подготовить модель Cleanup")
         finally:
             self._preparing.release()
+
+    def release_if_disabled(self):
+        with self._preparing:
+            if not self.enabled and self._encoding is not None:
+                call_json("spoke_cleanup_release")
+                self._encoding = None
+                self.status = "Локальный режим выключен"
 
     def process(self, raw: str) -> str:
         if not raw.strip():

@@ -21,3 +21,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: ./scripts/build_native.sh
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pytest pyobjc-framework-Cocoa pyobjc-framework-ApplicationServices pyobjc-framework-Quartz
+      - run: python -m pytest -q tests/test_macos_text_field.py

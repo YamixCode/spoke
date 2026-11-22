@@ -23,10 +23,22 @@ def library_path() -> Path:
 def load_library() -> ctypes.CDLL:
     return ctypes.CDLL(str(library_path()))
 
+_CancelCheck = ctypes.CFUNCTYPE(ctypes.c_int)
+
+
 def call_json(symbol: str, *arguments: bytes):
+    return _invoke(symbol, [ctypes.c_char_p] * len(arguments), arguments)
+
+
+def call_json_cancellable(symbol, cancelled, *arguments: bytes):
+    check = _CancelCheck(lambda: int(cancelled.is_set()))
+    return _invoke(symbol, [ctypes.c_char_p] * len(arguments) + [_CancelCheck], (*arguments, check))
+
+
+def _invoke(symbol, types, arguments):
     library = load_library()
     native = getattr(library, symbol)
-    native.argtypes = [ctypes.c_char_p] * len(arguments)
+    native.argtypes = types
     native.restype = ctypes.c_void_p
     pointer = native(*arguments)
     if not pointer:

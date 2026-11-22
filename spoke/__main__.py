@@ -31,7 +31,10 @@ def selftest(path: str) -> None:
 
 
 def main() -> None:
-    if "--devices" in sys.argv:
+    if "--install-terminal" in sys.argv:
+        from spoke.terminal import enable_integration
+        enable_integration()
+    elif "--devices" in sys.argv:
         import sounddevice as sd
         print(sd.query_devices())
     elif "--selftest" in sys.argv:

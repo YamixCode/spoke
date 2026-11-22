@@ -64,31 +64,31 @@ class StreamSession:
         self.parts: list[str] = []
         self.cut = 0
         self._stop = threading.Event()
+        self._cancelled = threading.Event()
         self._thread = threading.Thread(target=self._loop, daemon=True)
-        self._lock = threading.Lock()
 
     def start(self) -> "StreamSession":
         self._thread.start()
         return self
 
     def _transcribe(self, audio: np.ndarray) -> str:
+        if hasattr(self.transcriber, "transcribe_cancellable"):
+            return self.transcriber.transcribe_cancellable(audio, self.vocabulary, self._cancelled)
         return self.transcriber.transcribe(audio, self.vocabulary)
 
     def _loop(self) -> None:
         while not self._stop.wait(self.poll):
             try:
-                audio = self.recorder.snapshot()
-                pending = audio[self.cut:]
+                pending = self.recorder.snapshot_from(self.cut)
                 point = find_cut(pending, self.min_chunk, self.max_chunk, self.min_pause, self.silence_rms)
                 if point is None:
                     continue
-                with self._lock:
-                    chunk = pending[:point]
-                    if np.sqrt(np.mean(np.square(chunk))) >= self.silence_rms:
-                        text = self._transcribe(chunk)
-                        if text:
-                            self.parts.append(text)
-                    self.cut += point
+                chunk = pending[:point]
+                if np.sqrt(np.mean(np.square(chunk))) >= self.silence_rms:
+                    text = self._transcribe(chunk)
+                    if text:
+                        self.parts.append(text)
+                self.cut += point
             except Exception:
                 return
 
@@ -96,13 +96,16 @@ class StreamSession:
         """Звук целиком после остановки записи: распознать всё, что ещё не распознано, и склеить."""
         self._stop.set()
         self._thread.join(timeout=30)
-        with self._lock:
-            tail = audio[self.cut:]
-            if len(tail) >= int(0.3 * SAMPLE_RATE) and np.sqrt(np.mean(np.square(tail))) >= self.silence_rms:
-                text = self._transcribe(tail)
-                if text:
-                    self.parts.append(text)
-            return " ".join(self.parts).strip()
+        if self._thread.is_alive():
+            self._cancelled.set()
+            raise TimeoutError("Превышено время ожидания распознавания фрагмента.")
+        tail = audio[self.cut:]
+        if len(tail) >= int(0.3 * SAMPLE_RATE) and np.sqrt(np.mean(np.square(tail))) >= self.silence_rms:
+            text = self._transcribe(tail)
+            if text:
+                self.parts.append(text)
+        return " ".join(self.parts).strip()
 
     def cancel(self) -> None:
+        self._cancelled.set()
         self._stop.set()

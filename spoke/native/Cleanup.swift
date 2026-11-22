@@ -46,6 +46,12 @@ private final class CleanupModel {
         ])
     }
 
+    static func release() {
+        lock.lock()
+        defer { lock.unlock() }
+        loaded = nil
+    }
+
     static func prepare(path: String) throws {
         lock.lock()
         defer { lock.unlock() }
@@ -176,5 +182,13 @@ public func spokeCleanupGenerate(_ payload: UnsafePointer<CChar>) -> UnsafeMutab
         guard #available(macOS 26, *) else { throw CleanupError.unavailable }
         let request = try JSONDecoder().decode(CleanupInput.self, from: Data(String(cString: payload).utf8))
         return ["tokens": try CleanupModel.generate(request)]
+    }
+}
+
+@_cdecl("spoke_cleanup_release")
+public func spokeCleanupRelease() -> UnsafeMutablePointer<CChar>? {
+    cleanupResponse {
+        if #available(macOS 26, *) { CleanupModel.release() }
+        return [:]
     }
 }

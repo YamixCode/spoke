@@ -12,14 +12,17 @@ def load_main():
     if resources:
         plist = Path(resources).parent / "Info.plist"
         signed_distribution = plist.is_file() and plistlib.loads(plist.read_bytes()).get("SpokeSignedDistribution", False)
-    if not signed_distribution and (UPDATED_CODE / "spoke" / "__init__.py").exists():
-        sys.path.insert(0, str(UPDATED_CODE))
+    previous = UPDATED_CODE.with_name(UPDATED_CODE.name + ".old")
+    for code in (() if signed_distribution else (UPDATED_CODE, previous)):
+        if not (code / "spoke" / "__init__.py").exists():
+            continue
+        sys.path.insert(0, str(code))
         try:
             import spoke.app
             from spoke.__main__ import main
             return main
         except Exception:
-            sys.path.remove(str(UPDATED_CODE))
+            sys.path.remove(str(code))
             for name in [name for name in sys.modules if name == "spoke" or name.startswith("spoke.")]:
                 del sys.modules[name]
     from spoke.__main__ import main
